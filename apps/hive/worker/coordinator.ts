@@ -14,20 +14,49 @@ import {
   type LeaseScope,
   type RepoState,
   type RepoStats,
+  type RepoStatus,
 } from "@hive/core";
 import { DurableObject } from "cloudflare:workers";
-import { cloneRepo, initRepo, listFiles, push, readText, writeAndCommit, type Remote, type Workdir } from "./git.ts";
-import { DEMO_TASKS, type Task } from "./scenario.ts";
+import {
+  cloneRepo,
+  defaultBranch,
+  initRepo,
+  listFiles,
+  push,
+  readText,
+  writeAndCommit,
+  type Remote,
+  type Workdir,
+} from "./git.ts";
+import type { Task } from "./scenario.ts";
 import { SEED_FILES } from "./seed.ts";
 
 const MAX_ATTEMPTS = 3;
 const MAX_EVENTS = 300;
 const MAX_COMMITS = 50;
+/** Agents that may run at once in one repo. */
+export const MAX_ACTIVE_AGENTS = 8;
+const IMPORT_POLL_MS = 3_000;
+const IMPORT_TIMEOUT_MS = 5 * 60_000;
+
+export type RepoSource = { type: "empty"; title: string } | { type: "demo" } | { type: "import"; url: string };
+
+export interface InitInput {
+  id: string;
+  description: string;
+  source: RepoSource;
+}
 
 interface Persisted {
-  name: string;
+  id: string;
+  template: RepoSource["type"];
+  status: RepoStatus;
+  statusError: string | null;
+  description: string;
   remote: string;
+  branch: string;
   head: string | null;
+  importStartedAt?: number;
   leasesEnabled: boolean;
   agents: Record<string, AgentInfo>;
   leases: Record<string, Lease>;
@@ -41,6 +70,8 @@ interface Persisted {
 
 export interface JoinResult {
   forkName: string;
+  branch: string;
+  description: string;
   main: Remote;
   fork: Remote;
 }
@@ -61,9 +92,11 @@ export type SubmitResult =
 
 const emptyStats = (): RepoStats => ({ merges: 0, collisionsAvoided: 0, autoMerged: 0, replays: 0, rejected: 0 });
 
+const HIVE_AUTHOR = { name: "hive", email: "hive@hive.dev" };
+
 /**
- * One coordinator per Hive repo. It owns the lease table and the merge queue,
- * and it is the only writer to the repo's `main` branch in Artifacts.
+ * One coordinator per repo. It owns the lease table and the merge queue,
+ * and it is the only writer to the repo's default branch in Artifacts.
  */
 export class RepoCoordinator extends DurableObject<Env> {
   private s: Persisted | null = null;
@@ -80,34 +113,91 @@ export class RepoCoordinator extends DurableObject<Env> {
 
   // ---- lifecycle ---------------------------------------------------------
 
-  async init(name: string): Promise<RepoState> {
+  async init(input: InitInput): Promise<RepoState> {
     if (this.s) return this.state();
-
-    const created = await this.env.ARTIFACTS.create(name, {
-      description: "Hive demo repo: todo-api",
-      setDefaultBranch: "main",
-    });
-    const wd = await initRepo();
-    const sha = await writeAndCommit(wd, SEED_FILES, "Seed todo-api", { name: "hive", email: "hive@hive.dev" });
-    await push(wd, { url: created.remote, token: created.token });
-    this.mainWd = wd;
-
+    const { id, description, source } = input;
     this.s = {
-      name,
-      remote: created.remote,
-      head: sha,
+      id,
+      template: source.type,
+      status: "creating",
+      statusError: null,
+      description,
+      remote: "",
+      branch: "main",
+      head: null,
       leasesEnabled: true,
       agents: {},
       leases: {},
       intents: {},
-      commits: [{ sha, message: "Seed todo-api", author: "hive", at: Date.now() }],
-      files: Object.keys(SEED_FILES).sort(),
+      commits: [],
+      files: [],
       stats: emptyStats(),
       events: [],
       seq: 0,
     };
-    await this.emit({ type: "repo.ready", head: sha });
+
+    if (source.type === "import") {
+      const imported = await this.env.ARTIFACTS.import({
+        source: { url: source.url, depth: 1 },
+        target: { name: id, opts: { description } },
+      });
+      this.s.remote = imported.remote;
+      this.s.status = "importing";
+      this.s.importStartedAt = Date.now();
+      await this.persist();
+      await this.ctx.storage.setAlarm(Date.now() + IMPORT_POLL_MS);
+      return this.state();
+    }
+
+    const created = await this.env.ARTIFACTS.create(id, { description, setDefaultBranch: "main" });
+    const files =
+      source.type === "demo" ? SEED_FILES : { "README.md": `# ${source.title}\n\n${description}\n`.trimEnd() + "\n" };
+    const wd = await initRepo("main");
+    const sha = await writeAndCommit(
+      wd,
+      files,
+      source.type === "demo" ? "Seed todo-api" : "Initial commit",
+      HIVE_AUTHOR,
+    );
+    await push(wd, { url: created.remote, token: created.token });
+    this.mainWd = wd;
+    this.s.remote = created.remote;
+    this.s.files = Object.keys(files).sort();
+    await this.ready(sha, source.type === "demo" ? "Seed todo-api" : "Initial commit");
     return this.state();
+  }
+
+  private async ready(head: string, message: string) {
+    const s = this.require();
+    s.status = "ready";
+    s.head = head;
+    s.commits = [{ sha: head, message, author: "hive", at: Date.now() }];
+    await this.emit({ type: "repo.ready", head });
+  }
+
+  /** Finishes an import once Artifacts has the repo: find the real default branch, clone, index files. */
+  private async finishImport() {
+    const s = this.require();
+    try {
+      const remote = await this.mainRemote();
+      s.branch = await defaultBranch(remote);
+      const wd = await cloneRepo(remote, s.branch);
+      this.mainWd = wd;
+      s.files = await listFiles(wd);
+      using repo = await this.env.ARTIFACTS.get(s.id);
+      const [head] = await repo.log({ ref: s.branch, limit: 1 });
+      await this.ready(head.hash, head.message.split("\n")[0]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const pending = /IN_PROGRESS|not ready|NOT_FOUND/i.test(message);
+      if (pending && Date.now() - (s.importStartedAt ?? 0) < IMPORT_TIMEOUT_MS) {
+        await this.ctx.storage.setAlarm(Date.now() + IMPORT_POLL_MS);
+        return;
+      }
+      s.status = "failed";
+      s.statusError = message;
+      await this.emit({ type: "repo.failed", error: message });
+    }
   }
 
   async getState(): Promise<RepoState> {
@@ -122,27 +212,57 @@ export class RepoCoordinator extends DurableObject<Env> {
     return this.state();
   }
 
-  /** Spawns one agent per task. Agents run in their own Durable Objects. */
-  async runScenario(tasks: Task[] = DEMO_TASKS): Promise<RepoState> {
+  async setDescription(description: string): Promise<void> {
+    this.require().description = description;
+    await this.persist();
+  }
+
+  /** Deletes the repo, every agent fork and this object's state. */
+  async destroy(): Promise<void> {
+    const s = this.s;
+    if (s) {
+      for (const agent of Object.values(s.agents)) {
+        await this.env.ARTIFACTS.delete(agent.fork).catch(() => false);
+      }
+      await this.env.ARTIFACTS.delete(s.id).catch(() => false);
+    }
+    for (const ws of this.ctx.getWebSockets()) ws.close(1000, "repo deleted");
+    this.s = null;
+    this.mainWd = null;
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+  }
+
+  /** Spawns one agent per task. Each agent runs in its own Durable Object. */
+  async launchAgents(tasks: Task[]): Promise<RepoState> {
     const s = this.require();
+    if (s.status !== "ready") throw new Error(`repo is ${s.status}`);
+    const active = Object.values(s.agents).filter((a) => a.status !== "done" && a.status !== "failed").length;
+    if (active + tasks.length > MAX_ACTIVE_AGENTS) {
+      throw new Error(`at most ${MAX_ACTIVE_AGENTS} agents can run at once (${active} running)`);
+    }
     for (const task of tasks) {
       const index = Object.keys(s.agents).length + 1;
       const agentId = `a${index}`;
       const name = `${task.name}-${index}`;
       const join = await this.join(agentId, name, task.task);
-      const stub = this.env.AGENT.get(this.env.AGENT.idFromName(`${s.name}/${agentId}`));
-      await stub.start({ repo: s.name, agentId, name, task: task.task, ...join });
+      const stub = this.env.AGENT.get(this.env.AGENT.idFromName(`${s.id}/${agentId}`));
+      await stub.start({ repo: s.id, agentId, name, task: task.task, ...join });
     }
     return this.state();
   }
 
+  activeAgents(): number {
+    return Object.values(this.require().agents).filter((a) => a.status !== "done" && a.status !== "failed").length;
+  }
+
   // ---- agents -------------------------------------------------------------
 
-  /** Registers an agent: forks main into the agent's own repo and mints scoped tokens. */
-  async join(agentId: string, name: string, task: string): Promise<JoinResult> {
+  /** Registers an agent: forks the repo into the agent's own repo and mints scoped tokens. */
+  private async join(agentId: string, name: string, task: string): Promise<JoinResult> {
     const s = this.require();
-    const forkName = `${s.name}--${agentId}`;
-    using repo = await this.env.ARTIFACTS.get(s.name);
+    const forkName = `${s.id}--${agentId}`;
+    using repo = await this.env.ARTIFACTS.get(s.id);
     const forked = await repo.fork(forkName, { description: `Hive fork for ${name}`, defaultBranchOnly: true });
     const read = await repo.createToken("read", 6 * 3600);
 
@@ -160,13 +280,15 @@ export class RepoCoordinator extends DurableObject<Env> {
     await this.emit({ type: "agent.joined", agent });
     return {
       forkName,
+      branch: s.branch,
+      description: s.description,
       main: { url: s.remote, token: read.plaintext },
       fork: { url: forked.remote, token: forked.token },
     };
   }
 
   async agentStatus(agentId: string, status: AgentStatus, detail: string): Promise<void> {
-    const agent = this.require().agents[agentId];
+    const agent = this.s?.agents[agentId];
     if (!agent) return;
     agent.status = status;
     agent.detail = detail;
@@ -211,7 +333,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       : { id: crypto.randomUUID(), agentId, ...scope, reason, grantedAt: now, expiresAt: now + DEFAULT_LEASE_TTL_MS };
     s.leases[lease.id] = lease;
     await this.emit({ type: "lease.granted", lease });
-    await this.scheduleExpiry();
+    await this.scheduleAlarm();
     return { ok: true, lease };
   }
 
@@ -221,11 +343,12 @@ export class RepoCoordinator extends DurableObject<Env> {
     const expiresAt = Date.now() + DEFAULT_LEASE_TTL_MS;
     for (const lease of Object.values(s.leases)) if (lease.agentId === agentId) lease.expiresAt = expiresAt;
     await this.persist();
-    await this.scheduleExpiry();
+    await this.scheduleAlarm();
   }
 
   async releaseLeases(agentId: string): Promise<void> {
-    const s = this.require();
+    const s = this.s;
+    if (!s) return;
     for (const lease of Object.values(s.leases)) {
       if (lease.agentId !== agentId) continue;
       delete s.leases[lease.id];
@@ -236,6 +359,10 @@ export class RepoCoordinator extends DurableObject<Env> {
   override async alarm(): Promise<void> {
     const s = this.s;
     if (!s) return;
+    if (s.status === "importing") {
+      await this.finishImport();
+      return;
+    }
     const now = Date.now();
     for (const lease of Object.values(s.leases)) {
       if (isActive(lease, now)) continue;
@@ -248,10 +375,10 @@ export class RepoCoordinator extends DurableObject<Env> {
         reason: "expired",
       });
     }
-    await this.scheduleExpiry();
+    await this.scheduleAlarm();
   }
 
-  private async scheduleExpiry() {
+  private async scheduleAlarm() {
     const next = Math.min(...Object.values(this.require().leases).map((l) => l.expiresAt));
     if (Number.isFinite(next)) await this.ctx.storage.setAlarm(next + 50);
   }
@@ -348,7 +475,7 @@ export class RepoCoordinator extends DurableObject<Env> {
     intent.conflicts = undefined;
     s.head = sha;
     s.commits = [commit, ...s.commits].slice(0, MAX_COMMITS);
-    s.files = await listFiles(wd);
+    s.files = [...new Set([...s.files, ...Object.keys(merged)])].sort();
     s.stats.merges++;
     if (autoMerged) s.stats.autoMerged++;
     await this.emit({
@@ -371,7 +498,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       return sha;
     } catch (err) {
       // The cached clone may be stale (e.g. after an eviction); start from a fresh clone once.
-      console.warn("main push failed, recloning", err);
+      console.warn("push to main failed, recloning", err);
       this.mainWd = null;
       const wd = await this.main();
       const sha = await writeAndCommit(wd, files, message, author);
@@ -381,33 +508,18 @@ export class RepoCoordinator extends DurableObject<Env> {
   }
 
   private async main(): Promise<Workdir> {
-    this.mainWd ??= await cloneRepo(await this.mainRemote());
+    this.mainWd ??= await cloneRepo(await this.mainRemote(), this.require().branch);
     return this.mainWd;
   }
 
   private async mainRemote(): Promise<Remote> {
     const s = this.require();
     if (!this.mainToken || this.mainToken.expiresAt - Date.now() < 10 * 60_000) {
-      using repo = await this.env.ARTIFACTS.get(s.name);
+      using repo = await this.env.ARTIFACTS.get(s.id);
       const token = await repo.createToken("write", 3600);
       this.mainToken = { token: token.plaintext, expiresAt: Date.now() + 3600_000 };
     }
     return { url: s.remote, token: this.mainToken.token };
-  }
-
-  // ---- read helpers for the dashboard ------------------------------------
-
-  async readMainFile(path: string): Promise<string | null> {
-    using repo = await this.env.ARTIFACTS.get(this.require().name);
-    const blob = await repo.readFile({ ref: "main", path });
-    return blob ? blob.text() : null;
-  }
-
-  async cloneCommand(): Promise<string> {
-    const s = this.require();
-    using repo = await this.env.ARTIFACTS.get(s.name);
-    const token = await repo.createToken("read", 3600);
-    return `git -c http.extraHeader="Authorization: Bearer ${token.plaintext}" clone ${s.remote} ${s.name}`;
   }
 
   // ---- events & websockets -----------------------------------------------
@@ -451,15 +563,18 @@ export class RepoCoordinator extends DurableObject<Env> {
   private state(): RepoState {
     const s = this.require();
     return {
-      name: s.name,
+      id: s.id,
+      template: s.template,
+      status: s.status,
+      statusError: s.statusError,
       remote: s.remote,
+      branch: s.branch,
       head: s.head,
       leasesEnabled: s.leasesEnabled,
       agents: Object.values(s.agents),
       leases: Object.values(s.leases),
       intents: Object.values(s.intents).sort((a, b) => b.createdAt - a.createdAt),
       commits: s.commits,
-      files: s.files,
       stats: s.stats,
       events: s.events.slice(-150),
     };

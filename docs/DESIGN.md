@@ -48,6 +48,19 @@ the base content the agent started from. The coordinator's merge queue processes
 4. Conflicts → **replay**: return the current `main` content of the conflicting files to the agent, which redoes its
    intent on top of them and resubmits. After 3 attempts the intent is rejected.
 
+## Accounts and access
+
+- Users sign in with GitHub OAuth (`read:user` scope). A session is a random 256-bit id in an HttpOnly, `SameSite=Lax`
+  cookie, stored in the `Directory` Durable Object with a 30-day expiry. Writes are also refused when the `Origin`
+  header is not the deployment's own.
+- Each repository has an owner and a visibility. Private repositories return 404 to everyone but their owner, for the
+  API, the WebSocket and clone tokens alike. Public repositories are readable and cloneable by anyone; only the owner
+  can launch agents or change settings.
+- Agent runs spend the deployment's Anthropic credits, so each user has a daily allowance (admins exempt) and a repo
+  runs at most 8 agents at once.
+- Repositories have an internal id (`r` + 12 hex) that names the Artifacts repo, its forks (`<id>--a1`) and the
+  coordinator, so display names can stay human (`owner/name`) without colliding in the shared Artifacts namespace.
+
 ## Architecture
 
 | Component         | Runs on                       | Responsibility                                             |

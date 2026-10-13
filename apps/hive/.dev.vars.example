@@ -1,1 +1,6 @@
 ANTHROPIC_API_KEY=sk-ant-...
+# GitHub OAuth App: callback URL http://localhost:5173/auth/github/callback
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+# Local only: enables /auth/dev?login=name to sign in without GitHub
+HIVE_DEV_LOGIN=1

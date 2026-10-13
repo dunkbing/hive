@@ -1,45 +1,119 @@
-import type { HiveEvent, RepoState } from "@hive/core";
-import { useEffect, useState } from "react";
+import type { CommitDetail, CommitSummary, HiveEvent, Me, RepoRecord, RepoState, Tree, Visibility } from "@hive/core";
+import { useCallback, useEffect, useState } from "react";
+
+export class ApiError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
-  headers.set("content-type", "application/json");
+  if (init?.body) headers.set("content-type", "application/json");
   const res = await fetch(`/api${path}`, { ...init, headers });
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(body.error ?? `${res.status} ${res.statusText}`);
+    throw new ApiError(res.status, body.error ?? `${res.status} ${res.statusText}`);
   }
   return (res.headers.get("content-type") ?? "").includes("json") ? res.json() : ((await res.text()) as T);
 }
 
+const repoPath = (owner: string, name: string) => `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
+
+function query(params: Record<string, string | undefined>) {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v) q.set(k, v);
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
+export type RepoSourceInput = { type: "empty" } | { type: "demo" } | { type: "import"; url: string };
+
+export interface RepoPayload {
+  repo: RepoRecord;
+  canWrite: boolean;
+  state: RepoState;
+}
+
 export const api = {
-  createRepo: (name?: string) => call<RepoState>("/repos", { method: "POST", body: JSON.stringify({ name }) }),
-  state: (repo: string) => call<RepoState>(`/repos/${repo}/state`),
-  runScenario: (repo: string, count?: number) =>
-    call<RepoState>(`/repos/${repo}/scenario`, { method: "POST", body: JSON.stringify({ count }) }),
-  setLeases: (repo: string, leasesEnabled: boolean) =>
-    call<RepoState>(`/repos/${repo}/settings`, { method: "POST", body: JSON.stringify({ leasesEnabled }) }),
-  file: (repo: string, path: string) => call<string>(`/repos/${repo}/file?path=${encodeURIComponent(path)}`),
-  clone: (repo: string) => call<{ command: string }>(`/repos/${repo}/clone`),
+  me: () => call<Me>("/me"),
+  logout: () => fetch("/auth/logout", { method: "POST" }),
+  myRepos: () => call<RepoRecord[]>("/repos"),
+  explore: () => call<RepoRecord[]>("/explore"),
+  userRepos: (owner: string) => call<RepoRecord[]>(`/users/${encodeURIComponent(owner)}/repos`),
+  createRepo: (body: { name: string; description: string; visibility: Visibility; source: RepoSourceInput }) =>
+    call<RepoRecord>("/repos", { method: "POST", body: JSON.stringify(body) }),
+  repo: (owner: string, name: string) => call<RepoPayload>(repoPath(owner, name)),
+  tree: (owner: string, name: string, ref?: string, fork?: string) =>
+    call<Tree>(`${repoPath(owner, name)}/tree${query({ ref, fork })}`),
+  blob: (owner: string, name: string, path: string, ref?: string, fork?: string) =>
+    call<string>(`${repoPath(owner, name)}/blob${query({ path, ref, fork })}`),
+  commits: (owner: string, name: string, opts: { ref?: string; fork?: string; offset?: number } = {}) =>
+    call<CommitSummary[]>(
+      `${repoPath(owner, name)}/commits${query({
+        ref: opts.ref,
+        fork: opts.fork,
+        offset: opts.offset ? String(opts.offset) : undefined,
+      })}`,
+    ),
+  commit: (owner: string, name: string, sha: string, fork?: string) =>
+    call<CommitDetail>(`${repoPath(owner, name)}/commit/${sha}${query({ fork })}`),
+  clone: (owner: string, name: string) => call<{ command: string; remote: string }>(`${repoPath(owner, name)}/clone`),
+  launchAgents: (owner: string, name: string, body: { demo: true } | { tasks: { task: string }[] }) =>
+    call<RepoState>(`${repoPath(owner, name)}/agents`, { method: "POST", body: JSON.stringify(body) }),
+  updateSettings: (
+    owner: string,
+    name: string,
+    body: { leasesEnabled?: boolean; description?: string; visibility?: Visibility },
+  ) =>
+    call<{ repo: RepoRecord; state: RepoState }>(`${repoPath(owner, name)}/settings`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  deleteRepo: (owner: string, name: string) => call<{ ok: true }>(repoPath(owner, name), { method: "DELETE" }),
 };
 
-export type Connection = "connecting" | "live" | "offline";
+/** Runs `load` whenever `key` changes and tracks loading and error state. */
+export function useLoad<T>(load: () => Promise<T>, key: string) {
+  const [result, setResult] = useState<{ key: string; data?: T; error?: Error } | null>(null);
+  const [version, setVersion] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    load().then(
+      (data) => !cancelled && setResult({ key, data }),
+      (error: Error) => !cancelled && setResult({ key, error }),
+    );
+    return () => {
+      cancelled = true;
+    };
+    // `key` captures everything `load` depends on.
+  }, [key, version]); // oxlint-disable-line react-hooks/exhaustive-deps
+
+  const reload = useCallback(() => setVersion((v) => v + 1), []);
+  const current = result?.key === key ? result : null;
+  return { data: current?.data ?? null, error: current?.error ?? null, loading: !current, reload };
+}
+
+export type Connection = "connecting" | "live" | "polling";
 
 /**
- * Live repo state: a full snapshot on every event over a WebSocket. While the socket is down (some proxies and
- * conference networks block upgrades) it falls back to polling.
+ * Live coordination state for a repo: a snapshot on every event over a WebSocket, falling back to polling while the
+ * socket is down (some proxies and conference networks block upgrades).
  */
-export function useRepo(repo: string) {
-  const [state, setState] = useState<RepoState | null>(null);
+export function useLiveState(owner: string, name: string, initial: RepoState) {
+  const [state, setState] = useState<RepoState>(initial);
   const [lastEvent, setLastEvent] = useState<HiveEvent | null>(null);
   const [connection, setConnection] = useState<Connection>("connecting");
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let socket: WebSocket | null = null;
     let closed = false;
-    let retry = 0;
     let live = false;
+    let retry = 0;
     let lastSeq = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -52,17 +126,15 @@ export function useRepo(repo: string) {
       }
     };
     const poll = () =>
-      api.state(repo).then(
-        (next) => apply(next),
-        (err: Error) => setError(err.message),
+      api.repo(owner, name).then(
+        (p) => apply(p.state),
+        () => undefined,
       );
-
-    void poll();
-    const poller = setInterval(() => !live && void poll(), 2_000);
+    const poller = setInterval(() => !live && void poll(), 2_500);
 
     const connect = () => {
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      socket = new WebSocket(`${proto}://${location.host}/api/repos/${repo}/ws`);
+      socket = new WebSocket(`${proto}://${location.host}/api${repoPath(owner, name)}/ws`);
       socket.onopen = () => {
         retry = 0;
         live = true;
@@ -76,8 +148,8 @@ export function useRepo(repo: string) {
       socket.onclose = () => {
         if (closed) return;
         live = false;
-        setConnection("offline");
-        timer = setTimeout(connect, Math.min(10_000, 500 * 2 ** retry++));
+        setConnection("polling");
+        timer = setTimeout(connect, Math.min(15_000, 1_000 * 2 ** retry++));
       };
     };
     connect();
@@ -90,7 +162,7 @@ export function useRepo(repo: string) {
       clearInterval(poller);
       socket?.close();
     };
-  }, [repo]);
+  }, [owner, name]);
 
-  return { state, lastEvent, connection, error };
+  return { state, setState, lastEvent, connection };
 }

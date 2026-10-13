@@ -13,6 +13,7 @@ import { cloneRepo, fetchFrom, push, resetTo, writeAndCommit } from "./git.ts";
 const MAX_TURNS = 40;
 const LEASE_WAIT_MS = 150_000;
 const LEASE_POLL_MS = 3_000;
+const MAX_READ_BYTES = 120_000;
 
 export interface AgentConfig extends JoinResult {
   repo: string;
@@ -24,13 +25,13 @@ export interface AgentConfig extends JoinResult {
 const TOOLS: BetaTool[] = [
   {
     name: "list_files",
-    description: "List every file path in the repository's main branch.",
+    description: "List every file path in the repository's default branch.",
     input_schema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "read_file",
     description:
-      "Read a file. Returns your pending edit if you have written the file, otherwise the latest version on main.",
+      "Read a file. Returns your pending edit if you have written the file, otherwise the latest version on the default branch.",
     input_schema: {
       type: "object",
       properties: { path: { type: "string", description: "Repository-relative path, e.g. src/store.ts" } },
@@ -41,7 +42,7 @@ const TOOLS: BetaTool[] = [
   {
     name: "request_lease",
     description:
-      "Ask for an exclusive lease on a file before modifying it (including files you create). A granted lease returns the latest content of the file on main. If another agent holds the file, the lease is denied; either work on other files first or call again with wait=true to queue until it is free.",
+      "Ask for an exclusive lease on a file before modifying it (including files you create). A granted lease returns the latest content of the file. If another agent holds the file, the lease is denied; either work on other files first or call again with wait=true to queue until it is free.",
     input_schema: {
       type: "object",
       properties: {
@@ -79,18 +80,20 @@ const TOOLS: BetaTool[] = [
 ];
 
 function systemPrompt(config: AgentConfig) {
-  return `You are ${config.name}, one of several AI agents changing the same git repository at the same time through Hive. The repository is a small TypeScript TODO API (a Cloudflare Workers-style fetch handler with no framework).
+  const about = config.description ? `\n\nAbout this repository: ${config.description}` : "";
+  return `You are ${config.name}, one of several AI agents changing the same git repository at the same time through Hive.${about}
 
 How Hive works:
-- Before modifying or creating a file, call request_lease on it. A lease gives you exclusive edit rights and the latest content of that file on main. Other agents' leases block you; when that happens, do other parts of your task first, then call request_lease again with wait=true.
-- Lease only files you will change, and keep the change minimal and focused on your task. Do not reformat or refactor unrelated code; other agents are changing nearby code.
+- Start by exploring: list_files, then read the files relevant to your task.
+- Before modifying or creating a file, call request_lease on it. A lease gives you exclusive edit rights and the latest content of that file. Other agents' leases block you; when that happens, do other parts of your task first, then call request_lease again with wait=true.
+- Lease only files you will change, and keep the change minimal and focused on your task. Match the existing code style. Do not reformat or refactor unrelated code; other agents are changing nearby code.
 - write_file replaces the whole file, so always write the complete content.
 - When your change is complete, call submit with a one-sentence intent. If the merge queue reports a conflict, re-apply your intent on top of the current file versions it shows you, write the files again and submit again.
-- There is no human to ask and no way to run tests. Work it out from the code.`;
+- There is no human to ask and no way to run code. Work it out from the code.`;
 }
 
 function fence(path: string, content: string | null) {
-  return content === null ? `${path} does not exist yet on main.` : `### ${path}\n\`\`\`ts\n${content}\n\`\`\``;
+  return content === null ? `${path} does not exist yet.` : `### ${path}\n\`\`\`\n${content}\n\`\`\``;
 }
 
 /** An autonomous coding agent. Each agent lives in its own Durable Object and runs from an alarm. */
@@ -183,7 +186,7 @@ class AgentRun {
       messages.push({ role: "user", content: results });
     }
 
-    if (this.finished === "merged") await this.status("done", "merged into main");
+    if (this.finished === "merged") await this.status("done", "merged");
     else if (this.finished === "rejected") await this.status("failed", "intent rejected");
     else throw new Error(`gave up after ${MAX_TURNS} turns`);
   }
@@ -208,7 +211,7 @@ class AgentRun {
 
   private async readMain(path: string): Promise<string | null> {
     using repo = await this.env.ARTIFACTS.get(this.config.repo);
-    const blob = await repo.readFile({ ref: "main", path });
+    const blob = await repo.readFile({ ref: this.config.branch, path });
     return blob ? blob.text() : null;
   }
 
@@ -219,6 +222,9 @@ class AgentRun {
     const content = await this.readMain(path);
     if (!this.base.has(path)) this.base.set(path, content);
     if (content === null) throw new Error(`${path} does not exist`);
+    if (content.length > MAX_READ_BYTES) {
+      return `${content.slice(0, MAX_READ_BYTES)}\n\n[truncated: ${path} is ${content.length} bytes; only the first ${MAX_READ_BYTES} are shown]`;
+    }
     return content;
   }
 
@@ -243,7 +249,7 @@ class AgentRun {
     const content = await this.readMain(path);
     this.base.set(path, content);
     const note = this.leasesEnabled ? "Lease granted" : "Leases are disabled in this repo, go ahead";
-    return `${note}. Current content on main:\n\n${fence(path, content)}`;
+    return `${note}. Current content:\n\n${fence(path, content)}`;
   }
 
   private async writeFile(path: string, content: string): Promise<string> {
@@ -261,8 +267,8 @@ class AgentRun {
     const { agentId, name, main, fork } = this.config;
 
     await this.status("submitting", `committing to ${this.config.forkName}`);
-    const wd = await cloneRepo(fork);
-    await resetTo(wd, await fetchFrom(wd, "upstream", main));
+    const wd = await cloneRepo(fork, this.config.branch);
+    await resetTo(wd, await fetchFrom(wd, "upstream", main, this.config.branch));
     const commit = await writeAndCommit(wd, Object.fromEntries(this.edits), summary, {
       name,
       email: `${agentId}@agents.hive.dev`,
@@ -276,7 +282,7 @@ class AgentRun {
 
     if (result.status === "merged") {
       this.finished = "merged";
-      return `Merged into main as ${result.commit.slice(0, 7)}.`;
+      return `Merged as ${result.commit.slice(0, 7)}.`;
     }
     if (result.status === "rejected") {
       this.finished = "rejected";
@@ -286,7 +292,7 @@ class AgentRun {
     await this.status("replaying", `conflict in ${result.conflicts.map((c) => c.path).join(", ")}`);
     for (const conflict of result.conflicts) this.base.set(conflict.path, conflict.main);
     return [
-      "Merge conflict: other agents changed these files on main after you read them.",
+      "Merge conflict: other agents changed these files after you read them.",
       "Re-apply your intent on top of the current versions below (keep their changes), write each file again, then call submit again with the same summary.",
       "",
       ...result.conflicts.map((c) => fence(c.path, c.main)),

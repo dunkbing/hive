@@ -8,20 +8,27 @@
   "observability": { "enabled": true },
   "assets": {
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*"],
+    "run_worker_first": ["/api/*", "/auth/*"],
   },
   "limits": { "cpu_ms": 300000 },
   "vars": {
     "HIVE_MODEL": "claude-opus-5-5",
     "HIVE_EFFORT": "low",
-    "HIVE_LOCKED": "1",
+    // Agent runs per user per day. Logins in HIVE_ADMINS are exempt.
+    "HIVE_DAILY_AGENT_LIMIT": "20",
+    "HIVE_ADMINS": "dunkbing",
   },
+  // Secrets: ANTHROPIC_API_KEY, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET (see .dev.vars.example).
   "artifacts": [{ "binding": "ARTIFACTS", "namespace": "hive", "remote": true }],
   "durable_objects": {
     "bindings": [
+      { "name": "DIRECTORY", "class_name": "Directory" },
       { "name": "REPO", "class_name": "RepoCoordinator" },
       { "name": "AGENT", "class_name": "HiveAgent" },
     ],
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RepoCoordinator", "HiveAgent"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RepoCoordinator", "HiveAgent"] },
+    { "tag": "v2", "new_sqlite_classes": ["Directory"] },
+  ],
 }

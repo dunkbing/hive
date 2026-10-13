@@ -16,43 +16,61 @@ export interface Author {
 export interface Workdir {
   fs: MemoryFS;
   dir: string;
+  branch: string;
 }
 
 const DIR = "/repo";
 
 /** Git Basic auth wants only the secret part of an Artifacts token. */
-function onAuth(remotes: Remote[]) {
-  return (url: string) => {
-    const remote = remotes.find((r) => url.startsWith(r.url.replace(/\.git$/, ""))) ?? remotes[0];
-    return { username: "x", password: remote.token.split("?expires=")[0] };
-  };
+function onAuth(remote: Remote) {
+  return () => ({ username: "x", password: remote.token.split("?expires=")[0] });
 }
 
-export async function initRepo(): Promise<Workdir> {
+export async function initRepo(branch: string): Promise<Workdir> {
   const fs = new MemoryFS();
-  await git.init({ fs, dir: DIR, defaultBranch: "main" });
-  return { fs, dir: DIR };
+  await git.init({ fs, dir: DIR, defaultBranch: branch });
+  return { fs, dir: DIR, branch };
 }
 
-export async function cloneRepo(remote: Remote, ref = "main"): Promise<Workdir> {
+/** Shallow clone of a single branch; history is not needed to commit on top of it. */
+export async function cloneRepo(remote: Remote, branch: string): Promise<Workdir> {
   const fs = new MemoryFS();
-  await git.clone({ fs, http, dir: DIR, url: remote.url, ref, singleBranch: true, onAuth: onAuth([remote]) });
-  return { fs, dir: DIR };
+  await git.clone({
+    fs,
+    http,
+    dir: DIR,
+    url: remote.url,
+    ref: branch,
+    singleBranch: true,
+    depth: 1,
+    onAuth: onAuth(remote),
+  });
+  return { fs, dir: DIR, branch };
 }
 
 /** Fetches `ref` from another remote and returns the fetched commit. */
-export async function fetchFrom(wd: Workdir, name: string, remote: Remote, ref = "main"): Promise<string> {
-  const remotes = await git.listRemotes({ ...wd });
-  if (!remotes.some((r) => r.remote === name)) await git.addRemote({ ...wd, remote: name, url: remote.url });
-  const result = await git.fetch({ ...wd, http, remote: name, ref, singleBranch: true, onAuth: onAuth([remote]) });
+export async function fetchFrom(wd: Workdir, name: string, remote: Remote, ref: string): Promise<string> {
+  const remotes = await git.listRemotes({ fs: wd.fs, dir: wd.dir });
+  if (!remotes.some((r) => r.remote === name))
+    await git.addRemote({ fs: wd.fs, dir: wd.dir, remote: name, url: remote.url });
+  const result = await git.fetch({
+    fs: wd.fs,
+    dir: wd.dir,
+    http,
+    remote: name,
+    ref,
+    singleBranch: true,
+    depth: 1,
+    onAuth: onAuth(remote),
+  });
   if (!result.fetchHead) throw new Error(`could not fetch ${ref} from ${name}`);
   return result.fetchHead;
 }
 
-/** Points the local `main` branch at `oid` and checks it out. */
+/** Points the local branch at `oid` and checks it out. */
 export async function resetTo(wd: Workdir, oid: string): Promise<void> {
-  await git.writeRef({ ...wd, ref: "refs/heads/main", value: oid, force: true });
-  await git.checkout({ ...wd, ref: "main", force: true });
+  await git.writeRef({ fs: wd.fs, dir: wd.dir, ref: `refs/heads/${wd.branch}`, value: oid, force: true });
+  await git.checkout({ fs: wd.fs, dir: wd.dir, ref: wd.branch, force: true });
 }
 
 export async function writeAndCommit(
@@ -63,27 +81,23 @@ export async function writeAndCommit(
 ): Promise<string> {
   for (const [path, content] of Object.entries(files)) {
     await wd.fs.promises.writeFile(`${wd.dir}/${path}`, content);
-    await git.add({ ...wd, filepath: path });
+    await git.add({ fs: wd.fs, dir: wd.dir, filepath: path });
   }
-  return git.commit({ ...wd, message, author });
+  return git.commit({ fs: wd.fs, dir: wd.dir, message, author });
 }
 
-export async function push(wd: Workdir, remote: Remote, opts: { remoteName?: string; force?: boolean } = {}) {
+export async function push(wd: Workdir, remote: Remote, opts: { force?: boolean } = {}) {
   const result = await git.push({
-    ...wd,
+    fs: wd.fs,
+    dir: wd.dir,
     http,
     url: remote.url,
-    remote: opts.remoteName,
-    ref: "main",
-    remoteRef: "main",
+    ref: wd.branch,
+    remoteRef: wd.branch,
     force: opts.force,
-    onAuth: onAuth([remote]),
+    onAuth: onAuth(remote),
   });
   if (!result.ok) throw new Error(`push failed: ${JSON.stringify(result.refs)}`);
-}
-
-export async function headOid(wd: Workdir): Promise<string> {
-  return git.resolveRef({ ...wd, ref: "HEAD" });
 }
 
 export async function readText(wd: Workdir, path: string): Promise<string | null> {
@@ -95,5 +109,18 @@ export async function readText(wd: Workdir, path: string): Promise<string | null
 }
 
 export async function listFiles(wd: Workdir): Promise<string[]> {
-  return (await git.listFiles({ ...wd, ref: "HEAD" })).sort();
+  return (await git.listFiles({ fs: wd.fs, dir: wd.dir, ref: "HEAD" })).sort();
+}
+
+/** The branch the remote's HEAD points at. Import metadata can disagree with the imported refs, so ask git. */
+export async function defaultBranch(remote: Remote): Promise<string> {
+  const refs = await git.listServerRefs({
+    http,
+    url: remote.url,
+    symrefs: true,
+    prefix: "HEAD",
+    onAuth: onAuth(remote),
+  });
+  const target = refs.find((r) => r.ref === "HEAD")?.target;
+  return target?.replace(/^refs\/heads\//, "") ?? "main";
 }

@@ -73,6 +73,7 @@ export interface CommitInfo {
 
 export type HiveEventBody =
   | { type: "repo.ready"; head: string }
+  | { type: "repo.failed"; error: string }
   | { type: "repo.settings"; leasesEnabled: boolean }
   | { type: "agent.joined"; agent: AgentInfo }
   | { type: "agent.status"; agentId: string; status: AgentStatus; detail: string }
@@ -87,16 +88,23 @@ export type HiveEventBody =
 
 export type HiveEvent = HiveEventBody & { seq: number; ts: number };
 
+export type RepoStatus = "creating" | "importing" | "ready" | "failed";
+
+/** Live coordination state of one repo, pushed to dashboards on every change. */
 export interface RepoState {
-  name: string;
+  id: string;
+  /** What the repo was created from. */
+  template: "empty" | "demo" | "import";
+  status: RepoStatus;
+  statusError: string | null;
   remote: string;
+  branch: string;
   head: string | null;
   leasesEnabled: boolean;
   agents: AgentInfo[];
   leases: Lease[];
   intents: Intent[];
   commits: CommitInfo[];
-  files: string[];
   stats: RepoStats;
   events: HiveEvent[];
 }
