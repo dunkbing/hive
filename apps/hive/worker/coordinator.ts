@@ -6,6 +6,7 @@ import {
   mergeFile,
   type AgentInfo,
   type AgentStatus,
+  type CheckResult,
   type CommitInfo,
   type GithubLink,
   type HiveEvent,
@@ -25,9 +26,11 @@ import {
   defaultBranch,
   initRepo,
   listFiles,
+  headOf,
   push,
   readText,
   refresh,
+  resetTo,
   search,
   writeAndCommit,
   type Remote,
@@ -36,6 +39,7 @@ import {
 } from "./git.ts";
 import type { Task } from "./scenario.ts";
 import { SEED_FILES } from "./seed.ts";
+import { tar, type TarEntry } from "./tar.ts";
 
 /** Conflict replays before an intent is rejected. */
 const MAX_REPLAYS = 3;
@@ -47,6 +51,9 @@ const IMPORT_POLL_MS = 3_000;
 const IMPORT_TIMEOUT_MS = 10 * 60_000;
 /** Humans edit slower than agents. */
 const HUMAN_LEASE_TTL_MS = 30 * 60_000;
+const CHECK_TIMEOUT_SECONDS = 600;
+const MAX_CHECK_BYTES = 200 * 1024 * 1024;
+const DEMO_CHECK = "npm install --no-audit --no-fund --loglevel=error && npm run check";
 
 export type RepoSource = { type: "empty"; title: string } | { type: "demo" } | { type: "import"; url: string };
 
@@ -72,6 +79,7 @@ interface Persisted {
   pullRequests?: PullRequestInfo[];
   leasesEnabled: boolean;
   mergeMode: MergeMode;
+  checkCommand?: string;
   agents: Record<string, AgentInfo>;
   leases: Record<string, Lease>;
   intents: Record<string, Intent & { replays?: number }>;
@@ -93,6 +101,7 @@ export interface JoinResult {
 export interface AgentContext {
   leasesEnabled: boolean;
   mergeMode: MergeMode;
+  checkCommand: string;
 }
 
 export type LeaseResult = { ok: true; lease: Lease | null } | { ok: false; holder: Lease };
@@ -116,6 +125,7 @@ export type SubmitResult =
   | { status: "merged"; intentId: string; commit: string }
   | { status: "review"; intentId: string }
   | { status: "conflict"; intentId: string; conflicts: Conflict[] }
+  | { status: "check_failed"; intentId: string; command: string; log: string }
   | { status: "rejected"; intentId: string; reason: string };
 
 const emptyStats = (): RepoStats => ({ merges: 0, collisionsAvoided: 0, autoMerged: 0, replays: 0, rejected: 0 });
@@ -164,6 +174,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       head: null,
       leasesEnabled: true,
       mergeMode: "auto",
+      checkCommand: source.type === "demo" ? DEMO_CHECK : "",
       agents: {},
       leases: {},
       intents: {},
@@ -253,13 +264,18 @@ export class RepoCoordinator extends DurableObject<Env> {
     return this.state();
   }
 
-  async updateSettings(patch: { leasesEnabled?: boolean; mergeMode?: MergeMode }): Promise<RepoState> {
+  async updateSettings(patch: {
+    leasesEnabled?: boolean;
+    mergeMode?: MergeMode;
+    checkCommand?: string;
+  }): Promise<RepoState> {
     const s = this.require();
     if (patch.leasesEnabled !== undefined) {
       s.leasesEnabled = patch.leasesEnabled;
       if (!patch.leasesEnabled) s.leases = {};
     }
     if (patch.mergeMode) s.mergeMode = patch.mergeMode;
+    if (patch.checkCommand !== undefined) s.checkCommand = patch.checkCommand;
     await this.emit({ type: "repo.settings", leasesEnabled: s.leasesEnabled, mergeMode: s.mergeMode });
     return this.state();
   }
@@ -366,7 +382,7 @@ export class RepoCoordinator extends DurableObject<Env> {
 
   async agentContext(): Promise<AgentContext> {
     const s = this.require();
-    return { leasesEnabled: s.leasesEnabled, mergeMode: s.mergeMode };
+    return { leasesEnabled: s.leasesEnabled, mergeMode: s.mergeMode, checkCommand: s.checkCommand ?? "" };
   }
 
   async agentStatus(agentId: string, status: AgentStatus, detail: string): Promise<void> {
@@ -597,6 +613,9 @@ export class RepoCoordinator extends DurableObject<Env> {
     if (result.status === "conflict") {
       await agent.revise({ kind: "conflict", intentId, conflicts: result.conflicts });
     }
+    if (result.status === "check_failed") {
+      await agent.revise({ kind: "check", intentId, command: result.command, log: result.log });
+    }
     return result;
   }
 
@@ -674,7 +693,36 @@ export class RepoCoordinator extends DurableObject<Env> {
     }
 
     const message = `${intent.summary}\n\nHive-Intent: ${intent.id}\nHive-Agent: ${agent.name}`;
-    const sha = await this.commitToMain(merged, message, { name: agent.name, email: `${agent.id}@agents.hive.dev` });
+    const author = { name: agent.name, email: `${agent.id}@agents.hive.dev` };
+    let sha: string;
+    if (s.checkCommand) {
+      // Commit locally, check the exact tree that would land, and only then push.
+      const previous = await headOf(wd);
+      sha = await writeAndCommit(wd, merged, message, author);
+      await this.emit({ type: "intent.checking", intentId, agentId: intent.agentId });
+      const check = await this.runCheck(wd, s.checkCommand);
+      intent.check = check;
+      await this.emit({ type: "intent.checked", intentId, agentId: intent.agentId, result: check });
+      if (check.status === "failed") {
+        await resetTo(wd, previous);
+        intent.replays = (intent.replays ?? 0) + 1;
+        if (intent.replays > MAX_REPLAYS) {
+          intent.status = "rejected";
+          s.stats.rejected++;
+          const reason = `checks still failing after ${MAX_REPLAYS} attempts`;
+          await this.emit({ type: "intent.rejected", intentId, agentId: intent.agentId, reason });
+          await this.releaseLeases(intent.agentId);
+          return { status: "rejected", intentId, reason };
+        }
+        intent.status = "replaying";
+        s.stats.replays++;
+        await this.emit({ type: "intent.replaying", intentId, agentId: intent.agentId, attempt: intent.attempts + 1 });
+        return { status: "check_failed", intentId, command: s.checkCommand, log: check.log };
+      }
+      sha = await this.pushOrRedo(wd, sha, merged, message, author);
+    } else {
+      sha = await this.commitToMain(merged, message, author);
+    }
     const commit: CommitInfo = { sha, message: intent.summary, author: agent.name, at: Date.now() };
 
     intent.status = "merged";
@@ -747,6 +795,62 @@ export class RepoCoordinator extends DurableObject<Env> {
     s.head = commit.sha;
     s.commits = [commit, ...s.commits].slice(0, MAX_COMMITS);
     s.files = this.mainWd ? await listFiles(this.mainWd) : s.files;
+  }
+
+  /** Packs the working tree and runs `command` against it in a fresh sandbox. */
+  private async runCheck(wd: Workdir, command: string): Promise<CheckResult> {
+    const started = Date.now();
+    try {
+      const entries: TarEntry[] = [];
+      let bytes = 0;
+      for (const path of await listFiles(wd)) {
+        const full = `${wd.dir}/${path}`;
+        const stat = await wd.fs.promises.lstat(full);
+        if (stat.isSymbolicLink()) {
+          entries.push({ path, linkTarget: await wd.fs.promises.readlink(full) });
+          continue;
+        }
+        const data = (await wd.fs.promises.readFile(full)) as Uint8Array;
+        bytes += data.length;
+        if (bytes > MAX_CHECK_BYTES) {
+          return { status: "skipped", exitCode: 0, log: "Repository too large to check.", durationMs: 0 };
+        }
+        entries.push({ path, data, executable: stat.mode === 0o100755 });
+      }
+      const { archive } = tar(entries);
+      const sandbox = this.env.SANDBOX.get(this.env.SANDBOX.idFromName(crypto.randomUUID()));
+      return await sandbox.check(archive, command, CHECK_TIMEOUT_SECONDS);
+    } catch (err) {
+      // A sandbox outage should not stop every merge; record it and let the change through.
+      console.error("check could not run", err);
+      return {
+        status: "skipped",
+        exitCode: -1,
+        log: `The sandbox could not run: ${errorMessage(err)}`,
+        durationMs: Date.now() - started,
+      };
+    }
+  }
+
+  /** Pushes a local commit; if the remote moved meanwhile, redo the change on a fresh clone. */
+  private async pushOrRedo(
+    wd: Workdir,
+    sha: string,
+    files: Record<string, string | null>,
+    message: string,
+    author: { name: string; email: string },
+  ): Promise<string> {
+    try {
+      await push(wd, await this.mainRemote());
+      return sha;
+    } catch (err) {
+      console.warn("push to the default branch failed, recloning", err);
+      this.mainWd = null;
+      const fresh = await this.main();
+      const redone = await writeAndCommit(fresh, files, message, author);
+      await push(fresh, await this.mainRemote());
+      return redone;
+    }
   }
 
   private async commitToMain(
@@ -901,6 +1005,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       head: s.head,
       leasesEnabled: s.leasesEnabled,
       mergeMode: s.mergeMode,
+      checkCommand: s.checkCommand ?? "",
       github: githubLink(s),
       agents: Object.values(s.agents),
       leases: Object.values(s.leases),

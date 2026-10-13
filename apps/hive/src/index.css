@@ -2063,3 +2063,36 @@ a.agent-name {
   align-items: flex-start;
   gap: 8px;
 }
+
+/* ---- checks ------------------------------------------------------------------------- */
+
+.check-pill-passed {
+  border-color: rgba(63, 185, 80, 0.6);
+  color: var(--good);
+}
+
+.check-pill-failed {
+  border-color: rgba(248, 81, 73, 0.6);
+  color: var(--bad);
+}
+
+.check-pill-skipped {
+  color: var(--muted);
+}
+
+.check-log {
+  margin: 6px 0 0;
+  padding: 10px 12px;
+  max-height: 320px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.launcher-note {
+  margin: 0;
+}

@@ -192,3 +192,7 @@ export async function listRefs(remote: Remote): Promise<{ branches: string[]; ta
       .sort();
   return { branches: names("refs/heads/"), tags: names("refs/tags/") };
 }
+
+export async function headOf(wd: Workdir): Promise<string> {
+  return git.resolveRef({ fs: wd.fs, dir: wd.dir, ref: "HEAD" });
+}

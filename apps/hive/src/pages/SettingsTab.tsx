@@ -10,6 +10,7 @@ export function SettingsTab() {
   const { owner, name, repo, setRepo, canWrite, state, setState } = useRepo();
   const navigate = useNavigate();
   const [description, setDescription] = useState(repo.description);
+  const [checkCommand, setCheckCommand] = useState(state.checkCommand);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState("");
@@ -22,6 +23,7 @@ export function SettingsTab() {
     visibility?: Visibility;
     leasesEnabled?: boolean;
     mergeMode?: MergeMode;
+    checkCommand?: string;
   }) => {
     setSaving(true);
     setError(null);
@@ -84,6 +86,34 @@ export function SettingsTab() {
         >
           Make {repo.visibility === "public" ? "private" : "public"}
         </button>
+      </section>
+
+      <section className="panel">
+        <h2>Checks</h2>
+        <label className="field">
+          <span>Check command</span>
+          <div className="field-inline">
+            <input
+              className="mono"
+              value={checkCommand}
+              maxLength={500}
+              placeholder="e.g. npm ci && npm test"
+              onChange={(e) => setCheckCommand(e.target.value)}
+            />
+            <button
+              className="btn"
+              disabled={saving || checkCommand === state.checkCommand}
+              onClick={() => void save({ checkCommand })}
+            >
+              Save
+            </button>
+          </div>
+          <small className="muted">
+            Runs with bash in a fresh Linux sandbox (Debian, Node.js 24, internet access, 10 minute limit) against the
+            exact tree that would land. A failing check sends the output back to the agent instead of merging. Leave
+            empty to merge without checks. No secrets are available inside the sandbox.
+          </small>
+        </label>
       </section>
 
       <section className="panel">

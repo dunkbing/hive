@@ -106,3 +106,12 @@ export interface GithubLink {
   base: string | null;
   pullRequests: PullRequestInfo[];
 }
+
+/** The outcome of a repository's check command run against a merged tree in a sandbox. */
+export interface CheckResult {
+  status: "passed" | "failed" | "skipped";
+  exitCode: number;
+  /** The end of the combined output. */
+  log: string;
+  durationMs: number;
+}

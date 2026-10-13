@@ -28,6 +28,7 @@ export interface AgentConfig extends JoinResult {
 export type Revision =
   | { kind: "conflict"; intentId: string; conflicts: Conflict[] }
   | { kind: "changes"; intentId: string; comment: string; by: string }
+  | { kind: "check"; intentId: string; command: string; log: string }
   | { kind: "message"; message: string; by: string };
 
 type RunReason = { kind: "initial" } | Revision;
@@ -146,6 +147,9 @@ const TOOLS: BetaTool[] = [
 
 function systemPrompt(config: AgentConfig, ctx: AgentContext) {
   const about = config.description ? `\n\nAbout this repository: ${config.description}` : "";
+  const checks = ctx.checkCommand
+    ? `\n- Before your change lands, the repository's checks run against the merged result in a sandbox: \`${ctx.checkCommand}\`. If they fail you get the log and must fix the problem.`
+    : "";
   const review =
     ctx.mergeMode === "review"
       ? "\n- A person reviews every intent before it lands. They may request changes; you will be asked to revise."
@@ -157,9 +161,9 @@ How Hive works:
 - Before changing, creating or deleting a file, call request_lease on it. A lease gives you exclusive edit rights and the latest content of that file. Leases held by other agents or people block you; when that happens, do other parts of your task first, then call request_lease again with wait=true.
 - Lease only files you will change, and keep the change focused on your task. Match the existing code style. Do not reformat or refactor unrelated code; others are changing nearby code.
 - Use edit_file for targeted changes and write_file for new files or rewrites.
-- When your change is complete, call submit with a one-sentence intent. If the merge queue reports a conflict, re-apply your intent on top of the current file versions it shows you and submit again.${review}
+- When your change is complete, call submit with a one-sentence intent. If the merge queue reports a conflict, re-apply your intent on top of the current file versions it shows you and submit again.${checks}${review}
 - People may send you messages while you work; follow them.
-- There is no way to run code. Work it out from the code.`;
+- You cannot run code yourself. Work it out from the code.`;
 }
 
 function numbered(content: string, start = 1) {
@@ -323,7 +327,7 @@ class AgentRun {
   private reason: RunReason;
   private previous: Submission | null;
   private client: Anthropic;
-  private ctx: AgentContext = { leasesEnabled: true, mergeMode: "auto" };
+  private ctx: AgentContext = { leasesEnabled: true, mergeMode: "auto", checkCommand: "" };
   private snapshot: Workdir | null = null;
   /** Content of each file when the agent started working from it; the merge base. */
   private base = new Map<string, string | null>();
@@ -455,6 +459,22 @@ class AgentRun {
         "Re-apply your intent on top of the current versions below (keep their changes): lease the files, edit them, and submit again with the same summary.",
         "",
         ...reason.conflicts.map((c) => fence(c.path, c.main)),
+      ].join("\n");
+    }
+    if (reason.kind === "check") {
+      return [
+        task,
+        "",
+        `Your intent "${prev?.summary}" was approved, but the repository's checks failed on the merged result.`,
+        `Command: ${reason.command}`,
+        "",
+        "Output (end):",
+        "```",
+        reason.log.slice(-6000),
+        "```",
+        "",
+        pending,
+        "Fix the problem (lease, edit, submit again with the same summary).",
       ].join("\n");
     }
     if (reason.kind === "changes") {
@@ -668,6 +688,19 @@ class AgentRun {
       case "rejected":
         this.outcome = { status: "failed", detail: result.reason };
         return `Rejected: ${result.reason}.`;
+      case "check_failed":
+        await this.status("replaying", "checks failed");
+        // The rejected tree did not land: keep building on the same base.
+        return [
+          `The repository's checks failed on the merged result. Command: ${result.command}`,
+          "",
+          "Output (end):",
+          "```",
+          result.log.slice(-6000),
+          "```",
+          "",
+          "Fix the problem: your pending edits are kept. Edit the files (you still hold your leases if you renew them with request_lease), then call submit again with the same summary.",
+        ].join("\n");
       case "conflict":
         await this.status("replaying", `conflict in ${result.conflicts.map((c) => c.path).join(", ")}`);
         for (const conflict of result.conflicts) this.base.set(conflict.path, conflict.main);

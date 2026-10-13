@@ -90,7 +90,13 @@ export const api = {
   updateSettings: (
     owner: string,
     name: string,
-    body: { leasesEnabled?: boolean; mergeMode?: MergeMode; description?: string; visibility?: Visibility },
+    body: {
+      leasesEnabled?: boolean;
+      mergeMode?: MergeMode;
+      checkCommand?: string;
+      description?: string;
+      visibility?: Visibility;
+    },
   ) =>
     call<{ repo: RepoRecord; state: RepoState }>(`${repoPath(owner, name)}/settings`, {
       method: "POST",

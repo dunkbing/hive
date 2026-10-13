@@ -156,6 +156,11 @@ function Launcher() {
         </div>
       </div>
 
+      {state.checkCommand && (
+        <p className="muted small launcher-note">
+          Every merge is checked first with <code>{state.checkCommand}</code>.
+        </p>
+      )}
       {mode === "plan" ? (
         <>
           <textarea
@@ -541,6 +546,30 @@ function Feed({ events, agents }: { events: HiveEvent[]; agents: Map<string, Age
         return (
           <>
             {who(e.agentId)}’s intent rejected: {e.reason}
+          </>
+        );
+      case "intent.checking":
+        return <>Checking {who(e.agentId)}’s change in a sandbox</>;
+      case "intent.checked":
+        return (
+          <>
+            Checks {e.result.status} for {who(e.agentId)}
+            {e.result.durationMs > 0 && <span className="muted"> ({Math.round(e.result.durationMs / 1000)}s)</span>}
+          </>
+        );
+      case "github.synced":
+        return (
+          <>
+            <b>{e.by}</b> synced from GitHub{e.commit ? <> in {commitLink(e.commit.sha)}</> : " (no changes)"}
+          </>
+        );
+      case "github.pr":
+        return (
+          <>
+            <b>{e.by}</b> opened{" "}
+            <a href={e.pr.url} target="_blank" rel="noreferrer">
+              pull request #{e.pr.number}
+            </a>
           </>
         );
       case "commit.external":

@@ -1,4 +1,4 @@
-import { shortSha, type Intent } from "@hive/core";
+import { shortSha, type CheckResult, type Intent } from "@hive/core";
 import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router";
 import { api, useLoad } from "../api.ts";
@@ -107,6 +107,8 @@ function IntentCard({ intent, highlighted }: { intent: Intent; highlighted: bool
         </p>
       ) : null}
 
+      {intent.check && <CheckView check={intent.check} />}
+
       <button className="link small" onClick={() => setShowDiff((s) => !s)}>
         {showDiff ? "Hide changes" : "Show changes"}
       </button>
@@ -115,6 +117,24 @@ function IntentCard({ intent, highlighted }: { intent: Intent; highlighted: bool
       {canWrite && reviewing && <ReviewActions intent={intent} />}
       {canWrite && intent.status === "merged" && <RevertAction intent={intent} />}
     </article>
+  );
+}
+
+function CheckView({ check }: { check: CheckResult }) {
+  const { state } = useRepo();
+  const [open, setOpen] = useState(check.status === "failed");
+  const label = { passed: "Checks passed", failed: "Checks failed", skipped: "Checks skipped" }[check.status];
+  return (
+    <div className={`check check-${check.status}`}>
+      <button className="link small" onClick={() => setOpen((o) => !o)}>
+        <span className={`pill check-pill-${check.status}`}>{label}</span>{" "}
+        <span className="muted">
+          {state.checkCommand && <code>{state.checkCommand}</code>}{" "}
+          {check.durationMs > 0 && `${Math.round(check.durationMs / 1000)}s`} {open ? "▾" : "▸"}
+        </span>
+      </button>
+      {open && <pre className="check-log">{check.log || "(no output)"}</pre>}
+    </div>
   );
 }
 

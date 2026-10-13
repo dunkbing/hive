@@ -28,5 +28,14 @@ export default defineConfig({
       },
     ],
   },
-  plugins: lazyPlugins(() => [react(), cloudflare()]),
+  plugins: lazyPlugins(() => [
+    react(),
+    cloudflare({
+      // Checks run in containers, which need Docker locally. Without HIVE_DEV_CONTAINERS=1 they are reported as
+      // skipped in development; deployed Workers always run them.
+      config: (config) => ({
+        dev: { ...config.dev, enable_containers: process.env.HIVE_DEV_CONTAINERS === "1" },
+      }),
+    }),
+  ]),
 });

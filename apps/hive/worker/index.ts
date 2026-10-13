@@ -11,6 +11,7 @@ import { DEMO_TASKS, type Task } from "./scenario.ts";
 export { HiveAgent } from "./agent.ts";
 export { RepoCoordinator } from "./coordinator.ts";
 export { Directory } from "./directory.ts";
+export { HiveSandbox } from "./sandbox.ts";
 
 const REPO_NAME = /^[A-Za-z0-9._-]{1,64}$/;
 const AGENT_NAME = /^[a-z0-9-]{1,24}$/;
@@ -422,6 +423,7 @@ repo.post("/settings", async (c) => {
   const body = await c.req.json<{
     leasesEnabled?: boolean;
     mergeMode?: MergeMode;
+    checkCommand?: string;
     description?: string;
     visibility?: Visibility;
   }>();
@@ -429,6 +431,7 @@ repo.post("/settings", async (c) => {
   await coord.updateSettings({
     leasesEnabled: typeof body.leasesEnabled === "boolean" ? body.leasesEnabled : undefined,
     mergeMode: body.mergeMode === "auto" || body.mergeMode === "review" ? body.mergeMode : undefined,
+    checkCommand: typeof body.checkCommand === "string" ? body.checkCommand.trim().slice(0, 500) : undefined,
   });
   const patch: { description?: string; visibility?: Visibility } = {};
   if (typeof body.description === "string") {

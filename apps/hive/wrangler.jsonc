@@ -25,10 +25,14 @@
       { "name": "DIRECTORY", "class_name": "Directory" },
       { "name": "REPO", "class_name": "RepoCoordinator" },
       { "name": "AGENT", "class_name": "HiveAgent" },
+      { "name": "SANDBOX", "class_name": "HiveSandbox" },
     ],
   },
+  // Each check runs in a fresh Linux sandbox (a container started from a Durable Object).
+  "containers": [{ "class_name": "HiveSandbox", "scheduling_policy": "durable_object" }],
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["RepoCoordinator", "HiveAgent"] },
     { "tag": "v2", "new_sqlite_classes": ["Directory"] },
+    { "tag": "v3", "new_sqlite_classes": ["HiveSandbox"] },
   ],
 }

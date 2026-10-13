@@ -1,3 +1,5 @@
+import type { CheckResult, GithubLink, PullRequestInfo } from "./api.ts";
+
 /** A lease on a region of a file. Omitting the line range leases the whole file. */
 export interface LeaseScope {
   path: string;
@@ -72,6 +74,8 @@ export interface Intent {
   conflicts?: string[];
   /** The latest review comment, when changes were requested or the intent was rejected. */
   reviewComment?: string;
+  /** The latest check run against the merged result. */
+  check?: CheckResult;
 }
 
 export interface RepoStats {
@@ -104,6 +108,8 @@ export type HiveEventBody =
   | { type: "intent.merged"; intentId: string; agentId: string; commit: CommitInfo; mode: "direct" | "auto-merge" }
   | { type: "intent.conflict"; intentId: string; agentId: string; files: string[] }
   | { type: "intent.replaying"; intentId: string; agentId: string; attempt: number }
+  | { type: "intent.checking"; intentId: string; agentId: string }
+  | { type: "intent.checked"; intentId: string; agentId: string; result: CheckResult }
   | { type: "intent.review"; intentId: string; agentId: string }
   | { type: "intent.changes_requested"; intentId: string; agentId: string; comment: string; by: string }
   | { type: "intent.rejected"; intentId: string; agentId: string; reason: string }
@@ -113,8 +119,6 @@ export type HiveEventBody =
   | { type: "github.pr"; pr: PullRequestInfo; by: string };
 
 export type HiveEvent = HiveEventBody & { seq: number; ts: number };
-
-import type { GithubLink, PullRequestInfo } from "./api.ts";
 
 export type RepoStatus = "creating" | "importing" | "ready" | "failed";
 
@@ -130,6 +134,8 @@ export interface RepoState {
   head: string | null;
   leasesEnabled: boolean;
   mergeMode: MergeMode;
+  /** Shell command run in a sandbox against every merge before it lands; empty to skip. */
+  checkCommand: string;
   /** Set for repositories imported from GitHub. */
   github: GithubLink | null;
   agents: AgentInfo[];
