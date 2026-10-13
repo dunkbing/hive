@@ -129,6 +129,10 @@ For local development without GitHub, `HIVE_DEV_LOGIN=1` in `.dev.vars` enables 
 it in production. Local development uses the remote Artifacts service, so Wrangler needs `CLOUDFLARE_API_TOKEN` and
 `CLOUDFLARE_ACCOUNT_ID` in the environment (or `wrangler login`).
 
+Checks run in [Containers](https://developers.cloudflare.com/containers/) (Workers Paid plan; the API token used to
+deploy needs the Containers permission). Locally they need Docker, so `vp run dev` reports them as skipped unless
+you start it with `HIVE_DEV_CONTAINERS=1`.
+
 ### GitHub OAuth App
 
 Create one at <https://github.com/settings/developers> → **New OAuth App**:
@@ -171,23 +175,34 @@ vp run -r test      # unit tests (leases, 3-way merge)
 
 All routes are under `/api`. Writes need a session cookie and the `Origin` of the deployment.
 
-| Method | Route                                 | Access    | Description                                        |
-| ------ | ------------------------------------- | --------- | -------------------------------------------------- |
-| GET    | `/me`                                 | anyone    | Current user and daily allowance                   |
-| GET    | `/repos`                              | signed in | Your repositories                                  |
-| POST   | `/repos`                              | signed in | Create `{ name, description, visibility, source }` |
-| GET    | `/explore`                            | anyone    | Recent public repositories                         |
-| GET    | `/users/:owner/repos`                 | anyone    | A user's visible repositories                      |
-| GET    | `/repos/:owner/:name`                 | readers   | Repository and live coordination state             |
-| GET    | `/repos/:owner/:name/ws`              | readers   | WebSocket: `{ event, state }` on every change      |
-| GET    | `/repos/:owner/:name/tree?ref=&fork=` | readers   | File tree                                          |
-| GET    | `/repos/:owner/:name/blob?path=&ref=` | readers   | File content                                       |
-| GET    | `/repos/:owner/:name/commits?ref=`    | readers   | History                                            |
-| GET    | `/repos/:owner/:name/commit/:sha`     | readers   | Commit with per-file before/after                  |
-| GET    | `/repos/:owner/:name/clone`           | readers   | `git clone` command with a 1h read token           |
-| POST   | `/repos/:owner/:name/agents`          | owner     | Launch agents `{ tasks: [{ task }] }`              |
-| POST   | `/repos/:owner/:name/settings`        | owner     | `{ description?, visibility?, leasesEnabled? }`    |
-| DELETE | `/repos/:owner/:name`                 | owner     | Delete the repository and all forks                |
+| Method | Route                                     | Access    | Description                                            |
+| ------ | ----------------------------------------- | --------- | ------------------------------------------------------ |
+| GET    | `/me`                                     | anyone    | Current user and daily allowance                       |
+| GET    | `/repos`                                  | signed in | Your repositories                                      |
+| POST   | `/repos`                                  | signed in | Create `{ name, description, visibility, source }`     |
+| GET    | `/explore`                                | anyone    | Recent public repositories                             |
+| GET    | `/users/:owner/repos`                     | anyone    | A user's visible repositories                          |
+| GET    | `/repos/:owner/:name`                     | readers   | Repository and live coordination state                 |
+| GET    | `/repos/:owner/:name/ws`                  | readers   | WebSocket: `{ event, state }` on every change          |
+| GET    | `/repos/:owner/:name/tree?ref=&fork=`     | readers   | File tree                                              |
+| GET    | `/repos/:owner/:name/blob?path=&ref=`     | readers   | File content                                           |
+| GET    | `/repos/:owner/:name/commits?ref=`        | readers   | History                                                |
+| GET    | `/repos/:owner/:name/commit/:sha`         | readers   | Commit with per-file before/after                      |
+| GET    | `/repos/:owner/:name/clone`               | readers   | `git clone` command with a 1h read token               |
+| POST   | `/repos/:owner/:name/agents`              | owner     | Launch agents `{ tasks: [{ task }] }`                  |
+| POST   | `/repos/:owner/:name/settings`            | owner     | `{ description?, visibility?, leasesEnabled? }`        |
+| DELETE | `/repos/:owner/:name`                     | owner     | Delete the repository and all forks                    |
+| POST   | `/repos/:owner/:name/plan`                | owner     | Plan a goal into parallel tasks `{ goal }`             |
+| GET    | `/repos/:owner/:name/agents/:id`          | readers   | An agent and its transcript (`?after=`)                |
+| POST   | `/repos/:owner/:name/agents/:id/cancel`   | owner     | Cancel an agent                                        |
+| POST   | `/repos/:owner/:name/agents/:id/message`  | owner     | Message an agent `{ message }`                         |
+| POST   | `/repos/:owner/:name/intents/:id/approve` | owner     | Approve and merge (also `changes`, `reject`, `revert`) |
+| GET    | `/repos/:owner/:name/blame?path=`         | readers   | Line-by-line authorship                                |
+| GET    | `/repos/:owner/:name/search?q=`           | readers   | Regex code search on the default branch                |
+| GET    | `/repos/:owner/:name/refs`                | readers   | Branches and tags                                      |
+| POST   | `/repos/:owner/:name/leases`              | owner     | Lease a file by hand `{ path }` (DELETE releases)      |
+| POST   | `/repos/:owner/:name/github/pr`           | owner     | Open a pull request on the GitHub source               |
+| POST   | `/repos/:owner/:name/github/sync`         | owner     | Sync new upstream commits into Hive                    |
 
 Readers are the owner, plus everyone for public repositories. `fork=a1` targets an agent's fork.
 

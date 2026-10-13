@@ -92,11 +92,45 @@ touches the store and routes. Only the logger task is independent.
 Toggling leases off shows why they matter: the same tasks produce auto-merges and real conflicts, which Hive resolves
 by replaying intents.
 
+## Working with people
+
+- **Planner.** A goal becomes parallel tasks: a planning agent explores the repo with read-only tools and proposes
+  tasks with the files each will touch. Two tasks sharing a file is allowed; leases make those agents take turns.
+- **Transcripts and steering.** Agents record every step. A message to a running agent is delivered with its next
+  tool results; a message to a finished agent starts a revision run. Cancelling stops the loop between steps and
+  releases leases.
+- **Review mode.** Submissions wait for a person instead of entering the merge queue (leases are released meanwhile).
+  Approving runs the normal merge; a conflict or failed check at that point sends the agent back to revise the same
+  intent. Requesting changes does the same with the reviewer's comment.
+- **Revert** is a 3-way merge of the intent's inverse (after → before) onto the current head, so later changes to
+  the same files survive.
+- **People in the loop.** Owners can lease files (30-minute TTL) and push with a write token; the coordinator fetches
+  the remote before every merge, so it never overwrites commits made outside Hive.
+
+## Checks
+
+When a repository has a check command, the coordinator commits the merged result locally, packs the working tree into
+a tar archive and streams it into a fresh container (`cloudflare/debian-trixie`, Node.js 24, internet access, no
+credentials) where the command runs with a 10-minute limit. Only a passing tree is pushed. A failing check counts like
+a conflict: the agent gets the output and resubmits. If the sandbox itself cannot run, the check is recorded as
+skipped and the merge proceeds.
+
+## GitHub round trip
+
+For repositories imported from GitHub, Hive remembers the upstream commit it last synced with.
+
+- **Pull requests** compare Hive's head tree with that upstream tree by blob id (git object ids are content hashes,
+  so this is exact across both systems), upload only changed blobs, and create a tree, a commit on top of the synced
+  upstream commit, a `hive/…` branch and a pull request listing the merged intents. GitHub merges it against the
+  current upstream as usual.
+- **Sync** fetches what changed upstream since the synced commit and 3-way merges each file into Hive's head. If any
+  file conflicts nothing is applied. Binary files are reported, not merged.
+- Tokens with `repo` scope are requested separately from sign-in and stored sealed with AES-GCM (key derived from the
+  OAuth client secret).
+
 ## Next
 
-- **Tests before merge:** run the repo's checks in a Sandbox container against the merged tree and replay the intent
-  with the failure log on red.
-- **Line-range and symbol leases from agents:** the lease logic supports ranges; agents currently lease whole files.
 - **External agents:** expose join, lease and intent over HTTP / the Agent Client Protocol so any agent (Claude Code,
   Zed, Gemini CLI) can join a repo with its own fork and token.
 - **Tournament mode:** N agents on one task in N forks, with the best result merged.
+- **Organizations and collaborators,** notifications.
