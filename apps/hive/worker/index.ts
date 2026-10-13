@@ -15,6 +15,14 @@ app.onError((err, c) => {
   return c.json({ error: err.message }, 500);
 });
 
+// Until sign-in ships, nothing that spends API credits or mints tokens is reachable.
+app.use("*", async (c, next) => {
+  if (c.env.HIVE_LOCKED === "1" && (c.req.method !== "GET" || c.req.path.endsWith("/clone"))) {
+    return c.json({ error: "Hive is temporarily locked while sign-in is being added." }, 503);
+  }
+  await next();
+});
+
 app.use("/repos/:name/*", async (c, next) => {
   if (!REPO_NAME.test(c.req.param("name"))) return c.json({ error: "invalid repo name" }, 400);
   await next();
