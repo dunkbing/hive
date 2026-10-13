@@ -12,6 +12,7 @@ import {
   type Intent,
   type Lease,
   type LeaseScope,
+  type MergeMode,
   type RepoState,
   type RepoStats,
   type RepoStatus,
@@ -24,20 +25,26 @@ import {
   listFiles,
   push,
   readText,
+  refresh,
+  search,
   writeAndCommit,
   type Remote,
+  type SearchMatch,
   type Workdir,
 } from "./git.ts";
 import type { Task } from "./scenario.ts";
 import { SEED_FILES } from "./seed.ts";
 
-const MAX_ATTEMPTS = 3;
+/** Conflict replays before an intent is rejected. */
+const MAX_REPLAYS = 3;
 const MAX_EVENTS = 300;
 const MAX_COMMITS = 50;
 /** Agents that may run at once in one repo. */
 export const MAX_ACTIVE_AGENTS = 8;
 const IMPORT_POLL_MS = 3_000;
-const IMPORT_TIMEOUT_MS = 5 * 60_000;
+const IMPORT_TIMEOUT_MS = 10 * 60_000;
+/** Humans edit slower than agents. */
+const HUMAN_LEASE_TTL_MS = 30 * 60_000;
 
 export type RepoSource = { type: "empty"; title: string } | { type: "demo" } | { type: "import"; url: string };
 
@@ -56,11 +63,13 @@ interface Persisted {
   remote: string;
   branch: string;
   head: string | null;
+  importUrl?: string;
   importStartedAt?: number;
   leasesEnabled: boolean;
+  mergeMode: MergeMode;
   agents: Record<string, AgentInfo>;
   leases: Record<string, Lease>;
-  intents: Record<string, Intent>;
+  intents: Record<string, Intent & { replays?: number }>;
   commits: CommitInfo[];
   files: string[];
   stats: RepoStats;
@@ -76,27 +85,43 @@ export interface JoinResult {
   fork: Remote;
 }
 
-export type LeaseResult = { ok: true; lease: Lease | null } | { ok: false; holder: Lease; holderName: string };
+export interface AgentContext {
+  leasesEnabled: boolean;
+  mergeMode: MergeMode;
+}
+
+export type LeaseResult = { ok: true; lease: Lease | null } | { ok: false; holder: Lease };
+
+export interface IntentFile {
+  path: string;
+  /** Content the agent started from; null if the file did not exist. */
+  base: string | null;
+}
 
 export interface SubmitInput {
   intentId?: string;
   summary: string;
   commit: string;
-  files: { path: string; base: string | null }[];
+  files: IntentFile[];
 }
+
+export type Conflict = { path: string; main: string | null };
 
 export type SubmitResult =
   | { status: "merged"; intentId: string; commit: string }
-  | { status: "conflict"; intentId: string; conflicts: { path: string; main: string | null }[] }
+  | { status: "review"; intentId: string }
+  | { status: "conflict"; intentId: string; conflicts: Conflict[] }
   | { status: "rejected"; intentId: string; reason: string };
 
 const emptyStats = (): RepoStats => ({ merges: 0, collisionsAvoided: 0, autoMerged: 0, replays: 0, rejected: 0 });
 
 const HIVE_AUTHOR = { name: "hive", email: "hive@hive.dev" };
 
+const FINISHED: AgentStatus[] = ["done", "failed", "cancelled", "review"];
+
 /**
- * One coordinator per repo. It owns the lease table and the merge queue,
- * and it is the only writer to the repo's default branch in Artifacts.
+ * One coordinator per repo. It owns the lease table, the merge queue and the review queue,
+ * and it is the only writer to the repo's default branch in Artifacts (besides humans with write tokens).
  */
 export class RepoCoordinator extends DurableObject<Env> {
   private s: Persisted | null = null;
@@ -107,7 +132,10 @@ export class RepoCoordinator extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     void ctx.blockConcurrencyWhile(async () => {
-      this.s = (await ctx.storage.get<Persisted>("s")) ?? null;
+      const s = (await ctx.storage.get<Persisted>("s")) ?? null;
+      // State written by earlier versions lacks newer fields.
+      if (s) s.mergeMode ??= "auto";
+      this.s = s;
     });
   }
 
@@ -126,6 +154,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       branch: "main",
       head: null,
       leasesEnabled: true,
+      mergeMode: "auto",
       agents: {},
       leases: {},
       intents: {},
@@ -137,11 +166,13 @@ export class RepoCoordinator extends DurableObject<Env> {
     };
 
     if (source.type === "import") {
+      // Full history, so the Commits tab and blame go back to the beginning.
       const imported = await this.env.ARTIFACTS.import({
-        source: { url: source.url, depth: 1 },
+        source: { url: source.url },
         target: { name: id, opts: { description } },
       });
       this.s.remote = imported.remote;
+      this.s.importUrl = source.url;
       this.s.status = "importing";
       this.s.importStartedAt = Date.now();
       await this.persist();
@@ -152,18 +183,14 @@ export class RepoCoordinator extends DurableObject<Env> {
     const created = await this.env.ARTIFACTS.create(id, { description, setDefaultBranch: "main" });
     const files =
       source.type === "demo" ? SEED_FILES : { "README.md": `# ${source.title}\n\n${description}\n`.trimEnd() + "\n" };
+    const message = source.type === "demo" ? "Seed todo-api" : "Initial commit";
     const wd = await initRepo("main");
-    const sha = await writeAndCommit(
-      wd,
-      files,
-      source.type === "demo" ? "Seed todo-api" : "Initial commit",
-      HIVE_AUTHOR,
-    );
+    const sha = await writeAndCommit(wd, files, message, HIVE_AUTHOR);
     await push(wd, { url: created.remote, token: created.token });
     this.mainWd = wd;
     this.s.remote = created.remote;
     this.s.files = Object.keys(files).sort();
-    await this.ready(sha, source.type === "demo" ? "Seed todo-api" : "Initial commit");
+    await this.ready(sha, message);
     return this.state();
   }
 
@@ -216,11 +243,14 @@ export class RepoCoordinator extends DurableObject<Env> {
     return this.state();
   }
 
-  async setLeasesEnabled(enabled: boolean): Promise<RepoState> {
+  async updateSettings(patch: { leasesEnabled?: boolean; mergeMode?: MergeMode }): Promise<RepoState> {
     const s = this.require();
-    s.leasesEnabled = enabled;
-    if (!enabled) s.leases = {};
-    await this.emit({ type: "repo.settings", leasesEnabled: enabled });
+    if (patch.leasesEnabled !== undefined) {
+      s.leasesEnabled = patch.leasesEnabled;
+      if (!patch.leasesEnabled) s.leases = {};
+    }
+    if (patch.mergeMode) s.mergeMode = patch.mergeMode;
+    await this.emit({ type: "repo.settings", leasesEnabled: s.leasesEnabled, mergeMode: s.mergeMode });
     return this.state();
   }
 
@@ -234,6 +264,9 @@ export class RepoCoordinator extends DurableObject<Env> {
     const s = this.s;
     if (s) {
       for (const agent of Object.values(s.agents)) {
+        await this.agent(agent.id)
+          .cancel("repo deleted")
+          .catch(() => undefined);
         await this.env.ARTIFACTS.delete(agent.fork).catch(() => false);
       }
       await this.env.ARTIFACTS.delete(s.id).catch(() => false);
@@ -245,30 +278,33 @@ export class RepoCoordinator extends DurableObject<Env> {
     await this.ctx.storage.deleteAll();
   }
 
+  // ---- agents -------------------------------------------------------------
+
+  private agent(agentId: string) {
+    return this.env.AGENT.get(this.env.AGENT.idFromName(`${this.require().id}/${agentId}`));
+  }
+
+  activeAgents(): number {
+    return Object.values(this.require().agents).filter((a) => !FINISHED.includes(a.status)).length;
+  }
+
   /** Spawns one agent per task. Each agent runs in its own Durable Object. */
   async launchAgents(tasks: Task[]): Promise<RepoState> {
     const s = this.require();
     if (s.status !== "ready") throw new Error(`repo is ${s.status}`);
-    const active = Object.values(s.agents).filter((a) => a.status !== "done" && a.status !== "failed").length;
+    const active = this.activeAgents();
     if (active + tasks.length > MAX_ACTIVE_AGENTS) {
-      throw new Error(`at most ${MAX_ACTIVE_AGENTS} agents can run at once (${active} running)`);
+      throw new Error(`At most ${MAX_ACTIVE_AGENTS} agents can run at once (${active} running).`);
     }
     for (const task of tasks) {
       const index = Object.keys(s.agents).length + 1;
       const agentId = `a${index}`;
       const name = `${task.name}-${index}`;
       const join = await this.join(agentId, name, task.task);
-      const stub = this.env.AGENT.get(this.env.AGENT.idFromName(`${s.id}/${agentId}`));
-      await stub.start({ repo: s.id, agentId, name, task: task.task, ...join });
+      await this.agent(agentId).start({ repo: s.id, agentId, name, task: task.task, ...join });
     }
     return this.state();
   }
-
-  activeAgents(): number {
-    return Object.values(this.require().agents).filter((a) => a.status !== "done" && a.status !== "failed").length;
-  }
-
-  // ---- agents -------------------------------------------------------------
 
   /** Registers an agent: forks the repo into the agent's own repo and mints scoped tokens. */
   private async join(agentId: string, name: string, task: string): Promise<JoinResult> {
@@ -276,7 +312,7 @@ export class RepoCoordinator extends DurableObject<Env> {
     const forkName = `${s.id}--${agentId}`;
     using repo = await this.env.ARTIFACTS.get(s.id);
     const forked = await repo.fork(forkName, { description: `Hive fork for ${name}`, defaultBranchOnly: true });
-    const read = await repo.createToken("read", 6 * 3600);
+    const read = await repo.createToken("read", 24 * 3600);
 
     const agent: AgentInfo = {
       id: agentId,
@@ -299,6 +335,30 @@ export class RepoCoordinator extends DurableObject<Env> {
     };
   }
 
+  /** Fresh tokens for an agent starting another run (tokens from `join` may have expired). */
+  async agentCredentials(agentId: string): Promise<Pick<JoinResult, "main" | "fork" | "description" | "branch">> {
+    const s = this.require();
+    const agent = s.agents[agentId];
+    using repo = await this.env.ARTIFACTS.get(s.id);
+    using fork = await this.env.ARTIFACTS.get(agent.fork);
+    const [read, write, info] = await Promise.all([
+      repo.createToken("read", 24 * 3600),
+      fork.createToken("write", 24 * 3600),
+      fork.info(),
+    ]);
+    return {
+      branch: s.branch,
+      description: s.description,
+      main: { url: s.remote, token: read.plaintext },
+      fork: { url: info.remote, token: write.plaintext },
+    };
+  }
+
+  async agentContext(): Promise<AgentContext> {
+    const s = this.require();
+    return { leasesEnabled: s.leasesEnabled, mergeMode: s.mergeMode };
+  }
+
   async agentStatus(agentId: string, status: AgentStatus, detail: string): Promise<void> {
     const agent = this.s?.agents[agentId];
     if (!agent) return;
@@ -307,42 +367,97 @@ export class RepoCoordinator extends DurableObject<Env> {
     await this.emit({ type: "agent.status", agentId, status, detail });
   }
 
+  async cancelAgent(agentId: string, by: string): Promise<void> {
+    if (!this.require().agents[agentId]) throw new Error("no such agent");
+    await this.agent(agentId).cancel(`cancelled by ${by}`);
+  }
+
+  /** A message from a person to an agent: read on its next step, or starts a revision if it has finished. */
+  async messageAgent(agentId: string, message: string, by: string): Promise<void> {
+    if (!this.require().agents[agentId]) throw new Error("no such agent");
+    await this.agent(agentId).message(message, by);
+  }
+
+  async getIntent(intentId: string): Promise<Intent | null> {
+    return this.require().intents[intentId] ?? null;
+  }
+
   async listMainFiles(): Promise<string[]> {
     return this.require().files;
   }
 
-  async leasesEnabled(): Promise<boolean> {
-    return this.require().leasesEnabled;
+  async searchMain(pattern: string, prefix?: string): Promise<{ matches: SearchMatch[]; truncated: boolean }> {
+    let regex: RegExp;
+    try {
+      regex = new RegExp(pattern, "i");
+    } catch {
+      regex = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    }
+    const wd = await this.main();
+    await this.syncMain(wd);
+    return search(wd, regex, { prefix, limit: 200 });
   }
 
   // ---- leases -------------------------------------------------------------
 
   /** `retry` marks a repeated request from an agent waiting in line, which is not counted as a new collision. */
-  async requestLease(agentId: string, scope: LeaseScope, reason: string, retry = false): Promise<LeaseResult> {
+  async requestLease(holderId: string, scope: LeaseScope, reason: string, retry = false): Promise<LeaseResult> {
     const s = this.require();
     if (!s.leasesEnabled) return { ok: true, lease: null };
+    return this.grantLease(holderId, s.agents[holderId]?.name ?? holderId, scope, reason, DEFAULT_LEASE_TTL_MS, retry);
+  }
+
+  /** People can lease files too, so agents work around what they are editing. */
+  async humanLease(login: string, path: string, reason: string): Promise<LeaseResult> {
+    return this.grantLease(`human:${login}`, login, { path }, reason || "editing by hand", HUMAN_LEASE_TTL_MS, false);
+  }
+
+  async humanRelease(login: string, path: string): Promise<void> {
+    const s = this.require();
+    for (const lease of Object.values(s.leases)) {
+      if (lease.agentId !== `human:${login}` || lease.path !== path) continue;
+      delete s.leases[lease.id];
+      await this.emit({ type: "lease.released", leaseId: lease.id, agentId: lease.agentId, path, reason: "done" });
+    }
+  }
+
+  private async grantLease(
+    holderId: string,
+    holderName: string,
+    scope: LeaseScope,
+    reason: string,
+    ttl: number,
+    retry: boolean,
+  ): Promise<LeaseResult> {
+    const s = this.require();
     const now = Date.now();
     const leases = Object.values(s.leases);
-
-    const holder = findBlockingLease(leases, scope, agentId, now);
+    const holder = findBlockingLease(leases, scope, holderId, now);
     if (holder) {
       if (!retry) {
         s.stats.collisionsAvoided++;
-        await this.emit({ type: "lease.denied", agentId, scope, holder });
+        await this.emit({ type: "lease.denied", agentId: holderId, scope, holder });
       }
-      return { ok: false, holder, holderName: s.agents[holder.agentId]?.name ?? holder.agentId };
+      return { ok: false, holder };
     }
-
     const existing = leases.find(
       (l) =>
-        l.agentId === agentId &&
+        l.agentId === holderId &&
         l.path === scope.path &&
         l.startLine === scope.startLine &&
         l.endLine === scope.endLine,
     );
     const lease: Lease = existing
-      ? { ...existing, reason, expiresAt: now + DEFAULT_LEASE_TTL_MS }
-      : { id: crypto.randomUUID(), agentId, ...scope, reason, grantedAt: now, expiresAt: now + DEFAULT_LEASE_TTL_MS };
+      ? { ...existing, reason, expiresAt: now + ttl }
+      : {
+          id: crypto.randomUUID(),
+          agentId: holderId,
+          holderName,
+          ...scope,
+          reason,
+          grantedAt: now,
+          expiresAt: now + ttl,
+        };
     s.leases[lease.id] = lease;
     await this.emit({ type: "lease.granted", lease });
     await this.scheduleAlarm();
@@ -395,17 +510,20 @@ export class RepoCoordinator extends DurableObject<Env> {
     if (Number.isFinite(next)) await this.ctx.storage.setAlarm(next + 50);
   }
 
-  // ---- intents & merge queue ---------------------------------------------
+  // ---- intents: merge queue and review queue -------------------------------
 
-  /** Queues an intent and resolves once the merge queue has processed it. */
+  /**
+   * Records an intent. In auto mode it goes through the merge queue now and this resolves with the outcome;
+   * in review mode it waits for a person and this resolves right away.
+   */
   async submitIntent(agentId: string, input: SubmitInput): Promise<SubmitResult> {
     const s = this.require();
     let intent = input.intentId ? s.intents[input.intentId] : undefined;
     if (intent) {
+      intent.summary = input.summary;
       intent.commit = input.commit;
       intent.files = input.files.map((f) => f.path);
       intent.attempts++;
-      intent.status = "queued";
     } else {
       intent = {
         id: crypto.randomUUID().slice(0, 8),
@@ -419,27 +537,103 @@ export class RepoCoordinator extends DurableObject<Env> {
       };
       s.intents[intent.id] = intent;
     }
-    await this.emit({ type: "intent.queued", intent: { ...intent } });
+    intent.conflicts = undefined;
+    await this.ctx.storage.put(`input:${intent.id}`, input.files);
 
-    const result = this.mergeChain.then(() => this.merge(intent, input));
+    if (s.mergeMode === "review") {
+      intent.status = "review";
+      await this.emit({ type: "intent.review", intentId: intent.id, agentId });
+      // Nothing lands until a person approves, so do not block other agents meanwhile.
+      await this.releaseLeases(agentId);
+      return { status: "review", intentId: intent.id };
+    }
+
+    intent.status = "queued";
+    await this.emit({ type: "intent.queued", intent: { ...intent } });
+    try {
+      return await this.enqueue(intent.id);
+    } catch (err) {
+      intent.status = "rejected";
+      intent.reviewComment = `merge failed: ${errorMessage(err)}`;
+      await this.persist();
+      throw err;
+    }
+  }
+
+  private enqueue(intentId: string): Promise<SubmitResult> {
+    const result = this.mergeChain.then(() => this.merge(intentId));
     this.mergeChain = result.catch(() => undefined);
     return result;
   }
 
-  private async merge(intent: Intent, input: SubmitInput): Promise<SubmitResult> {
+  async approveIntent(intentId: string, by: string): Promise<SubmitResult> {
+    const intent = this.requireIntent(intentId);
+    if (intent.status !== "review") throw new Error(`intent is ${intent.status}, not awaiting review`);
+    intent.status = "queued";
+    intent.reviewComment = undefined;
+    await this.emit({ type: "intent.queued", intent: { ...intent } });
+    let result: SubmitResult;
+    try {
+      result = await this.enqueue(intentId);
+    } catch (err) {
+      // Leave it reviewable rather than stuck in the queue.
+      intent.status = "review";
+      await this.persist();
+      throw err;
+    }
+    const agent = this.agent(intent.agentId);
+    if (result.status === "merged") await this.agentStatus(intent.agentId, "done", `approved by ${by} and merged`);
+    if (result.status === "rejected") await this.agentStatus(intent.agentId, "failed", result.reason);
+    if (result.status === "conflict") {
+      await agent.revise({ kind: "conflict", intentId, conflicts: result.conflicts });
+    }
+    return result;
+  }
+
+  async requestChanges(intentId: string, comment: string, by: string): Promise<void> {
+    const intent = this.requireIntent(intentId);
+    if (intent.status !== "review") throw new Error(`intent is ${intent.status}, not awaiting review`);
+    intent.status = "changes_requested";
+    intent.reviewComment = comment;
+    await this.emit({ type: "intent.changes_requested", intentId, agentId: intent.agentId, comment, by });
+    await this.agent(intent.agentId).revise({ kind: "changes", intentId, comment, by });
+  }
+
+  async rejectIntent(intentId: string, comment: string, by: string): Promise<void> {
     const s = this.require();
+    const intent = this.requireIntent(intentId);
+    if (intent.status !== "review") throw new Error(`intent is ${intent.status}, not awaiting review`);
+    intent.status = "rejected";
+    intent.reviewComment = comment || undefined;
+    s.stats.rejected++;
+    const reason = `rejected by ${by}${comment ? `: ${comment}` : ""}`;
+    await this.emit({ type: "intent.rejected", intentId, agentId: intent.agentId, reason });
+    await this.agentStatus(intent.agentId, "failed", reason);
+  }
+
+  private requireIntent(intentId: string) {
+    const intent = this.require().intents[intentId];
+    if (!intent) throw new Error("no such intent");
+    return intent;
+  }
+
+  private async merge(intentId: string): Promise<SubmitResult> {
+    const s = this.require();
+    const intent = this.requireIntent(intentId);
     const agent = s.agents[intent.agentId];
+    const files = (await this.ctx.storage.get<IntentFile[]>(`input:${intentId}`)) ?? [];
     intent.status = "merging";
     await this.persist();
 
     const wd = await this.main();
+    await this.syncMain(wd);
     using fork = await this.env.ARTIFACTS.get(agent.fork);
 
-    const merged: Record<string, string> = {};
-    const conflicts: { path: string; main: string | null }[] = [];
+    const merged: Record<string, string | null> = {};
+    const conflicts: Conflict[] = [];
     let autoMerged = false;
-    for (const { path, base } of input.files) {
-      const blob = await fork.readFile({ ref: input.commit, path });
+    for (const { path, base } of files) {
+      const blob = await fork.readFile({ ref: intent.commit, path });
       const theirs = blob ? await blob.text() : null;
       const ours = await readText(wd, path);
       const result = mergeFile(base, ours, theirs);
@@ -453,69 +647,127 @@ export class RepoCoordinator extends DurableObject<Env> {
 
     if (conflicts.length > 0) {
       intent.conflicts = conflicts.map((c) => c.path);
-      await this.emit({
-        type: "intent.conflict",
-        intentId: intent.id,
-        agentId: intent.agentId,
-        files: intent.conflicts,
-      });
-      if (intent.attempts >= MAX_ATTEMPTS) {
+      intent.replays = (intent.replays ?? 0) + 1;
+      await this.emit({ type: "intent.conflict", intentId, agentId: intent.agentId, files: intent.conflicts });
+      if (intent.replays > MAX_REPLAYS) {
         intent.status = "rejected";
         s.stats.rejected++;
-        const reason = `still conflicting after ${intent.attempts} attempts`;
-        await this.emit({ type: "intent.rejected", intentId: intent.id, agentId: intent.agentId, reason });
+        const reason = `still conflicting after ${MAX_REPLAYS} replays`;
+        await this.emit({ type: "intent.rejected", intentId, agentId: intent.agentId, reason });
         await this.releaseLeases(intent.agentId);
-        return { status: "rejected", intentId: intent.id, reason };
+        return { status: "rejected", intentId, reason };
       }
       intent.status = "replaying";
       s.stats.replays++;
-      await this.emit({
-        type: "intent.replaying",
-        intentId: intent.id,
-        agentId: intent.agentId,
-        attempt: intent.attempts + 1,
-      });
-      return { status: "conflict", intentId: intent.id, conflicts };
+      await this.emit({ type: "intent.replaying", intentId, agentId: intent.agentId, attempt: intent.attempts + 1 });
+      return { status: "conflict", intentId, conflicts };
     }
 
     const message = `${intent.summary}\n\nHive-Intent: ${intent.id}\nHive-Agent: ${agent.name}`;
-    const sha = await this.commitToMain(merged, message, agent);
+    const sha = await this.commitToMain(merged, message, { name: agent.name, email: `${agent.id}@agents.hive.dev` });
     const commit: CommitInfo = { sha, message: intent.summary, author: agent.name, at: Date.now() };
 
     intent.status = "merged";
     intent.mergedAs = sha;
     intent.conflicts = undefined;
-    s.head = sha;
-    s.commits = [commit, ...s.commits].slice(0, MAX_COMMITS);
-    s.files = [...new Set([...s.files, ...Object.keys(merged)])].sort();
     s.stats.merges++;
     if (autoMerged) s.stats.autoMerged++;
+    await this.recordCommit(commit);
     await this.emit({
       type: "intent.merged",
-      intentId: intent.id,
+      intentId,
       agentId: intent.agentId,
       commit,
       mode: autoMerged ? "auto-merge" : "direct",
     });
     await this.releaseLeases(intent.agentId);
-    return { status: "merged", intentId: intent.id, commit: sha };
+    return { status: "merged", intentId, commit: sha };
   }
 
-  private async commitToMain(files: Record<string, string>, message: string, agent: AgentInfo): Promise<string> {
-    const author = { name: agent.name, email: `${agent.id}@agents.hive.dev` };
+  /** Undoes a merged intent with a new commit, 3-way merging so later changes to the same files survive. */
+  async revertIntent(intentId: string, by: string): Promise<CommitInfo> {
+    const run = this.mergeChain.then(() => this.revert(intentId, by));
+    this.mergeChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private async revert(intentId: string, by: string): Promise<CommitInfo> {
+    const s = this.require();
+    const intent = this.requireIntent(intentId);
+    if (intent.status !== "merged" || !intent.mergedAs) throw new Error("only merged intents can be reverted");
+    using repo = await this.env.ARTIFACTS.get(s.id);
+    const landed = await repo.readCommit(intent.mergedAs);
+    const parent = landed?.parents[0];
+    if (!parent) throw new Error("cannot revert the first commit");
+
+    const wd = await this.main();
+    await this.syncMain(wd);
+    const read = async (ref: string, path: string) => {
+      const blob = await repo.readFile({ ref, path });
+      return blob ? blob.text() : null;
+    };
+    const changes: Record<string, string | null> = {};
+    const conflicts: string[] = [];
+    for (const path of intent.files) {
+      const after = await read(intent.mergedAs, path);
+      const before = await read(parent, path);
+      const result = mergeFile(after, await readText(wd, path), before);
+      if (!result.clean) conflicts.push(path);
+      else changes[path] = result.text;
+    }
+    if (conflicts.length) {
+      throw new Error(`Cannot revert cleanly; later changes conflict in ${conflicts.join(", ")}.`);
+    }
+
+    const sha = await this.commitToMain(
+      changes,
+      `Revert "${intent.summary}"\n\nHive-Revert: ${intent.id}\nReverted-By: ${by}`,
+      { name: by, email: `${by}@users.hive.dev` },
+    );
+    const commit: CommitInfo = { sha, message: `Revert "${intent.summary}"`, author: by, at: Date.now() };
+    intent.status = "reverted";
+    intent.revertedAs = sha;
+    await this.recordCommit(commit);
+    await this.emit({ type: "intent.reverted", intentId, agentId: intent.agentId, commit, by });
+    return commit;
+  }
+
+  private async recordCommit(commit: CommitInfo) {
+    const s = this.require();
+    s.head = commit.sha;
+    s.commits = [commit, ...s.commits].slice(0, MAX_COMMITS);
+    s.files = this.mainWd ? await listFiles(this.mainWd) : s.files;
+  }
+
+  private async commitToMain(
+    files: Record<string, string | null>,
+    message: string,
+    author: { name: string; email: string },
+  ) {
     try {
       const wd = await this.main();
       const sha = await writeAndCommit(wd, files, message, author);
       await push(wd, await this.mainRemote());
       return sha;
     } catch (err) {
-      // The cached clone may be stale (e.g. after an eviction); start from a fresh clone once.
-      console.warn("push to main failed, recloning", err);
+      // Someone pushed in between, or the cached clone is stale: start from a fresh clone once.
+      console.warn("push to the default branch failed, recloning", err);
       this.mainWd = null;
       const wd = await this.main();
       const sha = await writeAndCommit(wd, files, message, author);
       await push(wd, await this.mainRemote());
       return sha;
+    }
+  }
+
+  /** Picks up commits pushed by people with write tokens, so merges never build on a stale head. */
+  private async syncMain(wd: Workdir) {
+    const s = this.require();
+    const head = await refresh(wd, await this.mainRemote());
+    if (head !== s.head) {
+      s.head = head;
+      s.files = await listFiles(wd);
+      await this.emit({ type: "commit.external", head });
     }
   }
 
@@ -583,9 +835,12 @@ export class RepoCoordinator extends DurableObject<Env> {
       branch: s.branch,
       head: s.head,
       leasesEnabled: s.leasesEnabled,
+      mergeMode: s.mergeMode,
       agents: Object.values(s.agents),
       leases: Object.values(s.leases),
-      intents: Object.values(s.intents).sort((a, b) => b.createdAt - a.createdAt),
+      intents: Object.values(s.intents)
+        .map(({ replays: _replays, ...intent }) => intent)
+        .sort((a, b) => b.createdAt - a.createdAt),
       commits: s.commits,
       stats: s.stats,
       events: s.events.slice(-150),

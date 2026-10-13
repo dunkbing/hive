@@ -29,4 +29,16 @@ describe("mergeFile", () => {
   test("new file created by the agent", () => {
     expect(mergeFile(null, null, "hello\n")).toEqual({ clean: true, text: "hello\n", mode: "fast-forward" });
   });
+
+  test("agent deletes a file unchanged on main", () => {
+    expect(mergeFile(base, base, null)).toEqual({ clean: true, text: null, mode: "fast-forward" });
+  });
+
+  test("deleting a file someone else changed conflicts", () => {
+    expect(mergeFile(base, `${base}// changed\n`, null).clean).toBe(false);
+  });
+
+  test("changing a file deleted on main conflicts", () => {
+    expect(mergeFile(base, null, `${base}// changed\n`).clean).toBe(false);
+  });
 });

@@ -1,4 +1,4 @@
-import type { Visibility } from "@hive/core";
+import type { MergeMode, Visibility } from "@hive/core";
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import { api } from "../api.ts";
@@ -17,7 +17,12 @@ export function SettingsTab() {
 
   if (!canWrite) return <NotFound />;
 
-  const save = async (body: { description?: string; visibility?: Visibility; leasesEnabled?: boolean }) => {
+  const save = async (body: {
+    description?: string;
+    visibility?: Visibility;
+    leasesEnabled?: boolean;
+    mergeMode?: MergeMode;
+  }) => {
     setSaving(true);
     setError(null);
     try {
@@ -83,6 +88,28 @@ export function SettingsTab() {
 
       <section className="panel">
         <h2>Coordination</h2>
+        <fieldset className="radio-group">
+          <legend>When an agent submits an intent</legend>
+          <label>
+            <input
+              type="radio"
+              checked={state.mergeMode === "auto"}
+              disabled={saving}
+              onChange={() => void save({ mergeMode: "auto" })}
+            />
+            <b>Auto-merge</b> <span className="muted">The merge queue lands it right away. Use revert to undo.</span>
+          </label>
+          <label>
+            <input
+              type="radio"
+              checked={state.mergeMode === "review"}
+              disabled={saving}
+              onChange={() => void save({ mergeMode: "review" })}
+            />
+            <b>Review before merge</b>{" "}
+            <span className="muted">Intents wait on the Intents tab until you approve, request changes or reject.</span>
+          </label>
+        </fieldset>
         <label className="checkbox">
           <input
             type="checkbox"

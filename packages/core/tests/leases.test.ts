@@ -4,6 +4,7 @@ import { findBlockingLease, holdsLease, scopesOverlap, type Lease } from "../src
 const lease = (over: Partial<Lease>): Lease => ({
   id: "l1",
   agentId: "a1",
+  holderName: "agent-1",
   path: "src/app.ts",
   reason: "test",
   grantedAt: 0,

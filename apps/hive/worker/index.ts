@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 import { auth, directory, loadUser, type AppEnv } from "./auth.ts";
 import { commitDetail, listTree, log } from "./browse.ts";
+import { planGoal } from "./planner.ts";
 import type { RepoSource } from "./coordinator.ts";
-import type { RepoRecord, Visibility } from "@hive/core";
+import type { MergeMode, RepoRecord, User, Visibility } from "@hive/core";
 import { DEMO_TASKS, type Task } from "./scenario.ts";
 
 export { HiveAgent } from "./agent.ts";
@@ -195,21 +196,125 @@ repo.post("/agents", async (c) => {
   if (tasks.length > MAX_TASKS_PER_LAUNCH)
     return c.json({ error: `At most ${MAX_TASKS_PER_LAUNCH} tasks at once.` }, 400);
 
-  if (!isAdmin(c.env, user.login)) {
-    const limit = Number(c.env.HIVE_DAILY_AGENT_LIMIT);
-    const left = await directory(c.env).reserveAgents(user.id, tasks.length, limit);
-    if (left < 0) return c.json({ error: `Daily limit of ${limit} agent runs reached. Try again tomorrow.` }, 429);
-  }
+  const limited = await reserveRuns(c.env, user, tasks.length);
+  if (limited) return c.json({ error: limited }, 429);
   return c.json(await coordinator(c.env, c.get("repo").id).launchAgents(tasks));
+});
+
+/** Turns a goal into parallel tasks for review before launching. */
+repo.post("/plan", async (c) => {
+  const user = c.get("user")!;
+  const { goal } = await c.req.json<{ goal?: string }>();
+  const text = (goal ?? "").trim().slice(0, MAX_TASK_LENGTH);
+  if (!text) return c.json({ error: "Describe what you want to build or change." }, 400);
+  const limited = await reserveRuns(c.env, user, 1);
+  if (limited) return c.json({ error: limited }, 429);
+  const record = c.get("repo");
+  const coord = coordinator(c.env, record.id);
+  const state = await coord.getState();
+  return c.json(
+    await planGoal(c.env, coord, { id: record.id, branch: state.branch, description: record.description }, text),
+  );
+});
+
+/** An agent's transcript, newest steps after `after`. */
+repo.get("/agents/:agentId", async (c) => {
+  const agentId = c.req.param("agentId");
+  const state = await coordinator(c.env, c.get("repo").id).getState();
+  const agent = state.agents.find((a) => a.id === agentId);
+  if (!agent) return c.json({ error: "agent not found" }, 404);
+  const stub = c.env.AGENT.get(c.env.AGENT.idFromName(`${c.get("repo").id}/${agentId}`));
+  const steps = await stub.transcript(Number(c.req.query("after") ?? 0) || 0);
+  return c.json({ agent, steps });
+});
+
+repo.post("/agents/:agentId/cancel", async (c) => {
+  await coordinator(c.env, c.get("repo").id).cancelAgent(c.req.param("agentId"), c.get("user")!.login);
+  return c.json({ ok: true });
+});
+
+repo.post("/agents/:agentId/message", async (c) => {
+  const user = c.get("user")!;
+  const { message } = await c.req.json<{ message?: string }>();
+  const text = (message ?? "").trim().slice(0, MAX_TASK_LENGTH);
+  if (!text) return c.json({ error: "Write a message." }, 400);
+  // A message to a finished agent starts a new run, which costs like one.
+  const limited = await reserveRuns(c.env, user, 1);
+  if (limited) return c.json({ error: limited }, 429);
+  await coordinator(c.env, c.get("repo").id).messageAgent(c.req.param("agentId"), text, user.login);
+  return c.json({ ok: true });
+});
+
+// ---- review queue -------------------------------------------------------------
+
+repo.post("/intents/:intentId/approve", async (c) =>
+  c.json(await coordinator(c.env, c.get("repo").id).approveIntent(c.req.param("intentId"), c.get("user")!.login)),
+);
+
+repo.post("/intents/:intentId/changes", async (c) => {
+  const user = c.get("user")!;
+  const { comment } = await c.req.json<{ comment?: string }>();
+  const text = (comment ?? "").trim().slice(0, MAX_TASK_LENGTH);
+  if (!text) return c.json({ error: "Describe the changes you want." }, 400);
+  const limited = await reserveRuns(c.env, user, 1);
+  if (limited) return c.json({ error: limited }, 429);
+  await coordinator(c.env, c.get("repo").id).requestChanges(c.req.param("intentId"), text, user.login);
+  return c.json({ ok: true });
+});
+
+repo.post("/intents/:intentId/reject", async (c) => {
+  const { comment } = await c.req.json<{ comment?: string }>().catch(() => ({ comment: "" }));
+  await coordinator(c.env, c.get("repo").id).rejectIntent(
+    c.req.param("intentId"),
+    (comment ?? "").trim().slice(0, MAX_TASK_LENGTH),
+    c.get("user")!.login,
+  );
+  return c.json({ ok: true });
+});
+
+repo.post("/intents/:intentId/revert", async (c) =>
+  c.json(await coordinator(c.env, c.get("repo").id).revertIntent(c.req.param("intentId"), c.get("user")!.login)),
+);
+
+// ---- people as participants -------------------------------------------------------
+
+/** Lease a file by hand so agents work around it. */
+repo.post("/leases", async (c) => {
+  const { path, reason } = await c.req.json<{ path?: string; reason?: string }>();
+  if (!path) return c.json({ error: "path is required" }, 400);
+  const result = await coordinator(c.env, c.get("repo").id).humanLease(c.get("user")!.login, path, reason ?? "");
+  return result.ok ? c.json(result) : c.json({ error: `${path} is leased by ${result.holder.holderName}` }, 409);
+});
+
+repo.delete("/leases", async (c) => {
+  const path = c.req.query("path");
+  if (!path) return c.json({ error: "path is required" }, 400);
+  await coordinator(c.env, c.get("repo").id).humanRelease(c.get("user")!.login, path);
+  return c.json({ ok: true });
+});
+
+/** Content search on the default branch. */
+repo.get("/search", async (c) => {
+  const q = (c.req.query("q") ?? "").trim();
+  if (!q) return c.json({ matches: [], truncated: false });
+  return c.json(await coordinator(c.env, c.get("repo").id).searchMain(q.slice(0, 200), c.req.query("prefix")));
 });
 
 repo.post("/retry", async (c) => c.json(await coordinator(c.env, c.get("repo").id).retryImport()));
 
 repo.post("/settings", async (c) => {
   const record = c.get("repo");
-  const body = await c.req.json<{ leasesEnabled?: boolean; description?: string; visibility?: Visibility }>();
+  const body = await c.req.json<{
+    leasesEnabled?: boolean;
+    mergeMode?: MergeMode;
+    description?: string;
+    visibility?: Visibility;
+  }>();
   const coord = coordinator(c.env, record.id);
-  if (typeof body.leasesEnabled === "boolean") await coord.setLeasesEnabled(body.leasesEnabled);
+  await coord.updateSettings({
+    leasesEnabled: typeof body.leasesEnabled === "boolean" ? body.leasesEnabled : undefined,
+    mergeMode: body.mergeMode === "auto" || body.mergeMode === "review" ? body.mergeMode : undefined,
+  });
   const patch: { description?: string; visibility?: Visibility } = {};
   if (typeof body.description === "string") {
     patch.description = body.description.trim().slice(0, 300);
@@ -229,6 +334,14 @@ repo.delete("/", async (c) => {
 
 api.route("/repos/:owner/:name", repo);
 app.route("/api", api);
+
+/** Reserves agent runs against the user's daily allowance; returns an error message when over it. */
+async function reserveRuns(env: Env, user: User, count: number): Promise<string | null> {
+  if (isAdmin(env, user.login)) return null;
+  const limit = Number(env.HIVE_DAILY_AGENT_LIMIT);
+  const left = await directory(env).reserveAgents(user.id, count, limit);
+  return left < 0 ? `Daily limit of ${limit} agent runs reached. Try again tomorrow.` : null;
+}
 
 function isAdmin(env: Env, login: string) {
   return env.HIVE_ADMINS.split(",")

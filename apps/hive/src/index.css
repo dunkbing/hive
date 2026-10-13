@@ -1513,3 +1513,319 @@ table.diff tbody {
     margin-left: 0;
   }
 }
+
+/* ---- segmented control, plan, launcher ----------------------------------------------- */
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.segmented button {
+  border: 0;
+  background: var(--panel-2);
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+
+.segmented button + button {
+  border-left: 1px solid var(--border-strong);
+}
+
+.segmented button.on {
+  background: var(--hover);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.toggle-select select {
+  height: 28px;
+  padding: 0 8px;
+  font-size: 13px;
+}
+
+.plan {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.plan-summary {
+  margin: 0;
+  color: var(--muted);
+}
+
+.plan-task {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  background: var(--panel-2);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.plan-task-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.plan-task-head input {
+  width: 220px;
+  font-weight: 600;
+}
+
+.plan-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.file-chip {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--border-strong);
+  color: var(--muted);
+}
+
+.file-chip.shared {
+  border-color: rgba(245, 165, 36, 0.6);
+  color: var(--honey);
+}
+
+.holder.human {
+  background: var(--text);
+}
+
+a.agent-name {
+  color: var(--text);
+}
+
+/* ---- agent page ------------------------------------------------------------------- */
+
+.agent-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 980px;
+}
+
+.agent-page-head {
+  border-left: 3px solid var(--agent);
+}
+
+.agent-page-head .agent-head {
+  flex-wrap: wrap;
+}
+
+.agent-title {
+  margin: 0;
+}
+
+.agent-page-task {
+  margin: 10px 0 4px;
+  white-space: pre-wrap;
+}
+
+.agent-actions {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.run-title {
+  font-size: 13px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 6px 0 8px;
+}
+
+.steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.step {
+  border-bottom: 1px solid var(--border);
+}
+
+.step:last-child {
+  border-bottom: 0;
+}
+
+.step-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 12px;
+  border: 0;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.step-head:disabled {
+  cursor: default;
+  color: var(--text);
+}
+
+.step-icon {
+  width: 16px;
+  text-align: center;
+  color: var(--muted);
+  flex: none;
+}
+
+.step-thinking .step-head,
+.step-text .step-head {
+  color: var(--muted);
+}
+
+.step-message .step-head {
+  background: rgba(108, 182, 255, 0.08);
+}
+
+.step-status .step-head {
+  font-weight: 600;
+}
+
+.step-error .step-head {
+  background: rgba(248, 81, 73, 0.08);
+}
+
+.step-error .step-icon {
+  color: var(--bad);
+}
+
+.step-body {
+  margin: 0;
+  padding: 10px 14px 12px 38px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  color: #c9d1d9;
+  background: var(--bg);
+  max-height: 420px;
+  overflow: auto;
+}
+
+.step-thinking .step-body,
+.step-text .step-body,
+.step-message .step-body {
+  font-family: inherit;
+  font-size: 13px;
+}
+
+/* ---- intents ------------------------------------------------------------------- */
+
+.intents-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.intent-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.intent-card.highlight {
+  border-color: var(--honey);
+}
+
+.intent-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.intent-head h3 {
+  margin: 0;
+}
+
+.intent-task,
+.review-comment {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.review-comment {
+  border-left: 3px solid var(--honey);
+  padding-left: 10px;
+  color: var(--text);
+}
+
+.intent-review,
+.intent-changes_requested {
+  border-color: rgba(245, 165, 36, 0.6);
+  color: var(--honey);
+}
+
+.intent-merged {
+  border-color: rgba(63, 185, 80, 0.6);
+  color: var(--good);
+}
+
+.intent-rejected,
+.intent-reverted {
+  border-color: rgba(248, 81, 73, 0.5);
+  color: var(--bad);
+}
+
+.intent-diff {
+  margin-top: 4px;
+}
+
+.review-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.status-review .badge,
+.status-badge-review {
+  background: rgba(245, 165, 36, 0.15);
+  color: var(--honey);
+}
+
+.status-cancelled .badge,
+.status-badge-cancelled {
+  background: #262d36;
+  color: var(--muted);
+}
+
+.status-badge-done {
+  background: rgba(63, 185, 80, 0.15);
+  color: var(--good);
+}
+
+.status-badge-failed {
+  background: rgba(248, 81, 73, 0.15);
+  color: var(--bad);
+}
+
+.stats {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}

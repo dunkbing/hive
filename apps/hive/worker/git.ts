@@ -73,17 +73,74 @@ export async function resetTo(wd: Workdir, oid: string): Promise<void> {
   await git.checkout({ fs: wd.fs, dir: wd.dir, ref: wd.branch, force: true });
 }
 
+/** Writes `files` (null deletes a file) and commits them. */
 export async function writeAndCommit(
   wd: Workdir,
-  files: Record<string, string>,
+  files: Record<string, string | null>,
   message: string,
   author: Author,
 ): Promise<string> {
   for (const [path, content] of Object.entries(files)) {
-    await wd.fs.promises.writeFile(`${wd.dir}/${path}`, content);
-    await git.add({ fs: wd.fs, dir: wd.dir, filepath: path });
+    if (content === null) {
+      await wd.fs.promises.unlink(`${wd.dir}/${path}`).catch(() => undefined);
+      await git.remove({ fs: wd.fs, dir: wd.dir, filepath: path });
+    } else {
+      await wd.fs.promises.writeFile(`${wd.dir}/${path}`, content);
+      await git.add({ fs: wd.fs, dir: wd.dir, filepath: path });
+    }
   }
   return git.commit({ fs: wd.fs, dir: wd.dir, message, author });
+}
+
+/** Moves the working copy to the remote's latest commit if someone else pushed. Returns the head. */
+export async function refresh(wd: Workdir, remote: Remote): Promise<string> {
+  // Working copies created with initRepo have no remote yet.
+  const remotes = await git.listRemotes({ fs: wd.fs, dir: wd.dir });
+  if (!remotes.some((r) => r.remote === "origin")) {
+    await git.addRemote({ fs: wd.fs, dir: wd.dir, remote: "origin", url: remote.url });
+  }
+  const result = await git.fetch({
+    fs: wd.fs,
+    dir: wd.dir,
+    http,
+    remote: "origin",
+    ref: wd.branch,
+    singleBranch: true,
+    depth: 1,
+    onAuth: onAuth(remote),
+  });
+  const head = await git.resolveRef({ fs: wd.fs, dir: wd.dir, ref: "HEAD" });
+  if (result.fetchHead && result.fetchHead !== head) {
+    await resetTo(wd, result.fetchHead);
+    return result.fetchHead;
+  }
+  return head;
+}
+
+export interface SearchMatch {
+  path: string;
+  line: number;
+  text: string;
+}
+
+/** Regex search over the working tree (text files only). */
+export async function search(wd: Workdir, pattern: RegExp, opts: { prefix?: string; limit?: number } = {}) {
+  const limit = opts.limit ?? 100;
+  const matches: SearchMatch[] = [];
+  for (const path of await listFiles(wd)) {
+    if (opts.prefix && !path.startsWith(opts.prefix)) continue;
+    const text = await readText(wd, path);
+    if (text === null || text.length > 1_000_000 || text.includes("\u0000")) continue;
+    const lines = text.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      pattern.lastIndex = 0;
+      if (pattern.test(lines[i])) {
+        matches.push({ path, line: i + 1, text: lines[i].slice(0, 300) });
+        if (matches.length >= limit) return { matches, truncated: true };
+      }
+    }
+  }
+  return { matches, truncated: false };
 }
 
 export async function push(wd: Workdir, remote: Remote, opts: { force?: boolean } = {}) {

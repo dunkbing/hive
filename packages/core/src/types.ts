@@ -7,7 +7,10 @@ export interface LeaseScope {
 
 export interface Lease extends LeaseScope {
   id: string;
+  /** The holder: an agent id, or `human:<login>` for a person. */
   agentId: string;
+  /** Display name of the holder. */
+  holderName: string;
   reason: string;
   grantedAt: number;
   expiresAt: number;
@@ -22,7 +25,10 @@ export type AgentStatus =
   | "submitting"
   | "queued"
   | "replaying"
+  /** Submitted; waiting for a human to review the intent. */
+  | "review"
   | "done"
+  | "cancelled"
   | "failed";
 
 export interface AgentInfo {
@@ -36,7 +42,17 @@ export interface AgentInfo {
   joinedAt: number;
 }
 
-export type IntentStatus = "queued" | "merging" | "merged" | "replaying" | "rejected";
+export type IntentStatus =
+  | "queued"
+  | "merging"
+  | "merged"
+  | "replaying"
+  | "review"
+  | "changes_requested"
+  | "rejected"
+  | "reverted";
+
+export type MergeMode = "auto" | "review";
 
 export interface Intent {
   id: string;
@@ -51,7 +67,11 @@ export interface Intent {
   createdAt: number;
   /** Commit on main the intent landed as. */
   mergedAs?: string;
+  /** Commit on main that reverted the intent. */
+  revertedAs?: string;
   conflicts?: string[];
+  /** The latest review comment, when changes were requested or the intent was rejected. */
+  reviewComment?: string;
 }
 
 export interface RepoStats {
@@ -74,7 +94,7 @@ export interface CommitInfo {
 export type HiveEventBody =
   | { type: "repo.ready"; head: string }
   | { type: "repo.failed"; error: string }
-  | { type: "repo.settings"; leasesEnabled: boolean }
+  | { type: "repo.settings"; leasesEnabled: boolean; mergeMode: MergeMode }
   | { type: "agent.joined"; agent: AgentInfo }
   | { type: "agent.status"; agentId: string; status: AgentStatus; detail: string }
   | { type: "lease.granted"; lease: Lease }
@@ -84,7 +104,11 @@ export type HiveEventBody =
   | { type: "intent.merged"; intentId: string; agentId: string; commit: CommitInfo; mode: "direct" | "auto-merge" }
   | { type: "intent.conflict"; intentId: string; agentId: string; files: string[] }
   | { type: "intent.replaying"; intentId: string; agentId: string; attempt: number }
-  | { type: "intent.rejected"; intentId: string; agentId: string; reason: string };
+  | { type: "intent.review"; intentId: string; agentId: string }
+  | { type: "intent.changes_requested"; intentId: string; agentId: string; comment: string; by: string }
+  | { type: "intent.rejected"; intentId: string; agentId: string; reason: string }
+  | { type: "intent.reverted"; intentId: string; agentId: string; commit: CommitInfo; by: string }
+  | { type: "commit.external"; head: string };
 
 export type HiveEvent = HiveEventBody & { seq: number; ts: number };
 
@@ -101,6 +125,7 @@ export interface RepoState {
   branch: string;
   head: string | null;
   leasesEnabled: boolean;
+  mergeMode: MergeMode;
   agents: AgentInfo[];
   leases: Lease[];
   intents: Intent[];

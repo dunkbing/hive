@@ -258,3 +258,33 @@ export function parseMessage(message: string) {
   }
   return { subject: lines[0], body: body.join("\n").trim(), trailers };
 }
+
+export const STATUS_LABEL: Record<import("@hive/core").AgentStatus, string> = {
+  idle: "starting",
+  planning: "planning",
+  reading: "reading",
+  waiting: "waiting for lease",
+  editing: "editing",
+  submitting: "committing",
+  queued: "in merge queue",
+  replaying: "replaying intent",
+  review: "awaiting review",
+  done: "done",
+  cancelled: "cancelled",
+  failed: "failed",
+};
+
+export const INTENT_LABEL: Record<import("@hive/core").IntentStatus, string> = {
+  queued: "queued",
+  merging: "merging",
+  merged: "merged",
+  replaying: "replaying",
+  review: "awaiting review",
+  changes_requested: "changes requested",
+  rejected: "rejected",
+  reverted: "reverted",
+};
+
+export function isRunning(status: import("@hive/core").AgentStatus) {
+  return !["done", "failed", "cancelled", "review"].includes(status);
+}

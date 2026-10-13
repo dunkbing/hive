@@ -61,3 +61,27 @@ export interface CommitDetail {
   files: FileChange[];
   truncated: boolean;
 }
+
+export interface TranscriptStep {
+  id: number;
+  /** Runs count up from 1: the first attempt, then revisions. */
+  run: number;
+  ts: number;
+  kind: "run" | "thinking" | "text" | "tool" | "message" | "status";
+  title: string;
+  body: string | null;
+  error: boolean;
+}
+
+export interface PlannedTask {
+  /** Short kebab-case agent name. */
+  name: string;
+  task: string;
+  /** Files the task expects to change; two tasks sharing a file will take turns on it. */
+  files: string[];
+}
+
+export interface Plan {
+  summary: string;
+  tasks: PlannedTask[];
+}

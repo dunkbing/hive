@@ -1,4 +1,18 @@
-import type { CommitDetail, CommitSummary, HiveEvent, Me, RepoRecord, RepoState, Tree, Visibility } from "@hive/core";
+import type {
+  AgentInfo,
+  CommitDetail,
+  CommitInfo,
+  CommitSummary,
+  HiveEvent,
+  Me,
+  MergeMode,
+  Plan,
+  RepoRecord,
+  RepoState,
+  TranscriptStep,
+  Tree,
+  Visibility,
+} from "@hive/core";
 import { useCallback, useEffect, useState } from "react";
 
 export class ApiError extends Error {
@@ -62,18 +76,51 @@ export const api = {
   commit: (owner: string, name: string, sha: string, fork?: string) =>
     call<CommitDetail>(`${repoPath(owner, name)}/commit/${sha}${query({ fork })}`),
   clone: (owner: string, name: string) => call<{ command: string; remote: string }>(`${repoPath(owner, name)}/clone`),
-  launchAgents: (owner: string, name: string, body: { demo: true } | { tasks: { task: string }[] }) =>
+  launchAgents: (owner: string, name: string, body: { demo: true } | { tasks: { name?: string; task: string }[] }) =>
     call<RepoState>(`${repoPath(owner, name)}/agents`, { method: "POST", body: JSON.stringify(body) }),
   updateSettings: (
     owner: string,
     name: string,
-    body: { leasesEnabled?: boolean; description?: string; visibility?: Visibility },
+    body: { leasesEnabled?: boolean; mergeMode?: MergeMode; description?: string; visibility?: Visibility },
   ) =>
     call<{ repo: RepoRecord; state: RepoState }>(`${repoPath(owner, name)}/settings`, {
       method: "POST",
       body: JSON.stringify(body),
     }),
   retryImport: (owner: string, name: string) => call<RepoState>(`${repoPath(owner, name)}/retry`, { method: "POST" }),
+  plan: (owner: string, name: string, goal: string) =>
+    call<Plan>(`${repoPath(owner, name)}/plan`, { method: "POST", body: JSON.stringify({ goal }) }),
+  agent: (owner: string, name: string, agentId: string, after = 0) =>
+    call<{ agent: AgentInfo; steps: TranscriptStep[] }>(`${repoPath(owner, name)}/agents/${agentId}?after=${after}`),
+  cancelAgent: (owner: string, name: string, agentId: string) =>
+    call<{ ok: true }>(`${repoPath(owner, name)}/agents/${agentId}/cancel`, { method: "POST" }),
+  messageAgent: (owner: string, name: string, agentId: string, message: string) =>
+    call<{ ok: true }>(`${repoPath(owner, name)}/agents/${agentId}/message`, {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    }),
+  approve: (owner: string, name: string, intentId: string) =>
+    call<{ status: string }>(`${repoPath(owner, name)}/intents/${intentId}/approve`, { method: "POST" }),
+  requestChanges: (owner: string, name: string, intentId: string, comment: string) =>
+    call<{ ok: true }>(`${repoPath(owner, name)}/intents/${intentId}/changes`, {
+      method: "POST",
+      body: JSON.stringify({ comment }),
+    }),
+  reject: (owner: string, name: string, intentId: string, comment: string) =>
+    call<{ ok: true }>(`${repoPath(owner, name)}/intents/${intentId}/reject`, {
+      method: "POST",
+      body: JSON.stringify({ comment }),
+    }),
+  revert: (owner: string, name: string, intentId: string) =>
+    call<CommitInfo>(`${repoPath(owner, name)}/intents/${intentId}/revert`, { method: "POST" }),
+  lease: (owner: string, name: string, path: string, reason = "") =>
+    call<{ ok: true }>(`${repoPath(owner, name)}/leases`, { method: "POST", body: JSON.stringify({ path, reason }) }),
+  release: (owner: string, name: string, path: string) =>
+    call<{ ok: true }>(`${repoPath(owner, name)}/leases${query({ path })}`, { method: "DELETE" }),
+  search: (owner: string, name: string, q: string) =>
+    call<{ matches: { path: string; line: number; text: string }[]; truncated: boolean }>(
+      `${repoPath(owner, name)}/search${query({ q })}`,
+    ),
   deleteRepo: (owner: string, name: string) => call<{ ok: true }>(repoPath(owner, name), { method: "DELETE" }),
 };
 

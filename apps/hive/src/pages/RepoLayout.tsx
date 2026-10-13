@@ -2,7 +2,7 @@ import type { HiveEvent, RepoRecord, RepoState } from "@hive/core";
 import { useState } from "react";
 import { Link, NavLink, Outlet, useLocation, useOutletContext, useParams } from "react-router";
 import { api, useLiveState, useLoad, type ApiError, type Connection } from "../api.ts";
-import { ErrorBox, Modal, Spinner, VisibilityBadge } from "../components.tsx";
+import { ErrorBox, Modal, Spinner, VisibilityBadge, isRunning } from "../components.tsx";
 import { NotFound } from "./Shell.tsx";
 
 export interface RepoContext {
@@ -38,7 +38,8 @@ function LoadedRepo(props: { owner: string; name: string; repo: RepoRecord; canW
   const live = useLiveState(owner, name, props.state);
   const [cloneOpen, setCloneOpen] = useState(false);
   const { state } = live;
-  const running = state.agents.filter((a) => a.status !== "done" && a.status !== "failed").length;
+  const running = state.agents.filter((a) => isRunning(a.status)).length;
+  const reviews = state.intents.filter((i) => i.status === "review").length;
 
   const ctx: RepoContext = { owner, name, repo, setRepo, canWrite, ...live };
   const onSettings = useLocation().pathname.endsWith("/settings");
@@ -73,6 +74,14 @@ function LoadedRepo(props: { owner: string; name: string; repo: RepoRecord; canW
           Agents
           {running > 0 && <span className="count live">{running}</span>}
           {running === 0 && state.agents.length > 0 && <span className="count">{state.agents.length}</span>}
+        </NavLink>
+        <NavLink to={`/${owner}/${name}/intents`}>
+          Intents
+          {reviews > 0 ? (
+            <span className="count live">{reviews}</span>
+          ) : (
+            state.intents.length > 0 && <span className="count">{state.intents.length}</span>
+          )}
         </NavLink>
         {canWrite && <NavLink to={`/${owner}/${name}/settings`}>Settings</NavLink>}
       </nav>
