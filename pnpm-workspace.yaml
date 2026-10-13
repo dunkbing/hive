@@ -1,0 +1,27 @@
+packages:
+  - apps/*
+  - packages/*
+  - tools/*
+
+catalog:
+  "@anthropic-ai/sdk": ^0.133.0
+  "@cloudflare/vite-plugin": ^1.63.1
+  "@types/node": ^24
+  hono: ^4.13.13
+  isomorphic-git: ^1.44.2
+  node-diff3: ^3.2.1
+  typescript: ^7.0.2
+  vite: npm:@voidzero-dev/vite-plus-core@1.1.0
+  vite-plus: 1.1.0
+  wrangler: ^4.150.0
+
+catalogMode: prefer
+
+overrides:
+  vite@*: "catalog:"
+
+peerDependencyRules:
+  allowAny:
+    - vite
+  allowedVersions:
+    vite: "*"

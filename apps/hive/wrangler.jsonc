@@ -1,0 +1,26 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "hive",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-10-13",
+  "compatibility_flags": ["nodejs_compat"],
+  "upload_source_maps": true,
+  "observability": { "enabled": true },
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"],
+  },
+  "limits": { "cpu_ms": 300000 },
+  "vars": {
+    "HIVE_MODEL": "claude-opus-5-5",
+    "HIVE_EFFORT": "low",
+  },
+  "artifacts": [{ "binding": "ARTIFACTS", "namespace": "hive", "remote": true }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "REPO", "class_name": "RepoCoordinator" },
+      { "name": "AGENT", "class_name": "HiveAgent" },
+    ],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RepoCoordinator", "HiveAgent"] }],
+}

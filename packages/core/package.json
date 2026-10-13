@@ -1,0 +1,23 @@
+{
+  "name": "@hive/core",
+  "version": "0.0.0",
+  "description": "Hive core: leases, intents, events, 3-way merge",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "test": "vp test",
+    "check": "vp check"
+  },
+  "dependencies": {
+    "node-diff3": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2",
+    "vite-plus": "catalog:"
+  }
+}
