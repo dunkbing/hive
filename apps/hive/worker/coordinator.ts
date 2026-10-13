@@ -8,6 +8,9 @@ import {
   type AgentStatus,
   type CheckResult,
   type CommitInfo,
+  type FileChange,
+  type Goal,
+  type GoalMode,
   type GithubLink,
   type HiveEvent,
   type HiveEventBody,
@@ -19,6 +22,9 @@ import {
   type RepoState,
   type RepoStats,
   type RepoStatus,
+  type NotificationKind,
+  type TaskItem,
+  type TaskStatus,
 } from "@hive/core";
 import { DurableObject } from "cloudflare:workers";
 import {
@@ -83,6 +89,10 @@ interface Persisted {
   agents: Record<string, AgentInfo>;
   leases: Record<string, Lease>;
   intents: Record<string, Intent & { replays?: number }>;
+  tasks: Record<number, TaskItem>;
+  goals: Record<number, Goal>;
+  /** Tasks and goals share one counter. */
+  nextNumber: number;
   commits: CommitInfo[];
   files: string[];
   stats: RepoStats;
@@ -93,6 +103,8 @@ interface Persisted {
 export interface JoinResult {
   forkName: string;
   branch: string;
+  /** The branch the agent reads and its intents merge into: the default branch, or a goal branch. */
+  target: string;
   description: string;
   main: Remote;
   fork: Remote;
@@ -140,7 +152,8 @@ const FINISHED: AgentStatus[] = ["done", "failed", "cancelled", "review"];
  */
 export class RepoCoordinator extends DurableObject<Env> {
   private s: Persisted | null = null;
-  private mainWd: Workdir | null = null;
+  /** In-memory clones by branch: the default branch, plus goal branches while their goals are active. */
+  private wds = new Map<string, Workdir>();
   private mainToken: { token: string; expiresAt: number } | null = null;
   private mergeChain: Promise<unknown> = Promise.resolve();
 
@@ -151,6 +164,9 @@ export class RepoCoordinator extends DurableObject<Env> {
       // State written by earlier versions lacks newer fields.
       if (s) {
         s.mergeMode ??= "auto";
+        s.tasks ??= {};
+        s.goals ??= {};
+        s.nextNumber ??= 0;
         // Imports made before importBase existed: the import head is the oldest commit Hive recorded.
         if (s.template === "import" && s.status === "ready" && !s.importBase) s.importBase = s.commits.at(-1)?.sha;
       }
@@ -178,6 +194,9 @@ export class RepoCoordinator extends DurableObject<Env> {
       agents: {},
       leases: {},
       intents: {},
+      tasks: {},
+      goals: {},
+      nextNumber: 0,
       commits: [],
       files: [],
       stats: emptyStats(),
@@ -207,7 +226,7 @@ export class RepoCoordinator extends DurableObject<Env> {
     const wd = await initRepo("main");
     const sha = await writeAndCommit(wd, files, message, HIVE_AUTHOR);
     await push(wd, { url: created.remote, token: created.token });
-    this.mainWd = wd;
+    this.wds.set("main", wd);
     this.s.remote = created.remote;
     this.s.files = Object.keys(files).sort();
     await this.ready(sha, message);
@@ -229,7 +248,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       const remote = await this.mainRemote();
       s.branch = await defaultBranch(remote);
       const wd = await cloneRepo(remote, s.branch);
-      this.mainWd = wd;
+      this.wds.set(s.branch, wd);
       s.files = await listFiles(wd);
       using repo = await this.env.ARTIFACTS.get(s.id);
       const [head] = await repo.log({ ref: s.branch, limit: 1 });
@@ -299,7 +318,7 @@ export class RepoCoordinator extends DurableObject<Env> {
     }
     for (const ws of this.ctx.getWebSockets()) ws.close(1000, "repo deleted");
     this.s = null;
-    this.mainWd = null;
+    this.wds.clear();
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
   }
@@ -322,18 +341,30 @@ export class RepoCoordinator extends DurableObject<Env> {
     if (active + tasks.length > MAX_ACTIVE_AGENTS) {
       throw new Error(`At most ${MAX_ACTIVE_AGENTS} agents can run at once (${active} running).`);
     }
-    for (const task of tasks) {
-      const index = Object.keys(s.agents).length + 1;
-      const agentId = `a${index}`;
-      const name = `${task.name}-${index}`;
-      const join = await this.join(agentId, name, task.task);
-      await this.agent(agentId).start({ repo: s.id, agentId, name, task: task.task, ...join });
-    }
+    for (const task of tasks) await this.spawn(task.name, task.task);
     return this.state();
   }
 
+  /** Starts one agent; `taskNumber` links it to a task, whose goal decides the branch it works against. */
+  private async spawn(taskName: string, text: string, taskNumber?: number): Promise<string> {
+    const s = this.require();
+    const index = Object.keys(s.agents).length + 1;
+    const agentId = `a${index}`;
+    const name = `${taskName}-${index}`;
+    const task = taskNumber ? s.tasks[taskNumber] : undefined;
+    if (task) {
+      // Link first: the agent's first status update looks the task up by agent.
+      task.agentId = agentId;
+      task.assignee = `agent:${agentId}`;
+    }
+    const join = await this.join(agentId, name, text, task);
+    await this.agent(agentId).start({ repo: s.id, agentId, name, task: text, ...join });
+    if (task) await this.setTaskStatus(task, "in_progress");
+    return agentId;
+  }
+
   /** Registers an agent: forks the repo into the agent's own repo and mints scoped tokens. */
-  private async join(agentId: string, name: string, task: string): Promise<JoinResult> {
+  private async join(agentId: string, name: string, task: string, item?: TaskItem): Promise<JoinResult> {
     const s = this.require();
     const forkName = `${s.id}--${agentId}`;
     using repo = await this.env.ARTIFACTS.get(s.id);
@@ -355,6 +386,7 @@ export class RepoCoordinator extends DurableObject<Env> {
     return {
       forkName,
       branch: s.branch,
+      target: this.targetOf(item),
       description: s.description,
       main: { url: s.remote, token: read.plaintext },
       fork: { url: forked.remote, token: forked.token },
@@ -362,7 +394,9 @@ export class RepoCoordinator extends DurableObject<Env> {
   }
 
   /** Fresh tokens for an agent starting another run (tokens from `join` may have expired). */
-  async agentCredentials(agentId: string): Promise<Pick<JoinResult, "main" | "fork" | "description" | "branch">> {
+  async agentCredentials(
+    agentId: string,
+  ): Promise<Pick<JoinResult, "main" | "fork" | "description" | "branch" | "target">> {
     const s = this.require();
     const agent = s.agents[agentId];
     using repo = await this.env.ARTIFACTS.get(s.id);
@@ -374,23 +408,43 @@ export class RepoCoordinator extends DurableObject<Env> {
     ]);
     return {
       branch: s.branch,
+      target: this.targetOf(this.taskOfAgent(agentId)),
       description: s.description,
       main: { url: s.remote, token: read.plaintext },
       fork: { url: info.remote, token: write.plaintext },
     };
   }
 
-  async agentContext(): Promise<AgentContext> {
+  async agentContext(agentId?: string): Promise<AgentContext> {
     const s = this.require();
-    return { leasesEnabled: s.leasesEnabled, mergeMode: s.mergeMode, checkCommand: s.checkCommand ?? "" };
+    // Intents on a goal branch are reviewed once, as part of the goal.
+    const task = agentId ? this.taskOfAgent(agentId) : undefined;
+    const mergeMode = this.goalOf(task)?.mode === "branch" ? "auto" : s.mergeMode;
+    return { leasesEnabled: s.leasesEnabled, mergeMode, checkCommand: s.checkCommand ?? "" };
   }
 
   async agentStatus(agentId: string, status: AgentStatus, detail: string): Promise<void> {
     const agent = this.s?.agents[agentId];
     if (!agent) return;
+    const before = agent.status;
     agent.status = status;
     agent.detail = detail;
     await this.emit({ type: "agent.status", agentId, status, detail });
+    const task = this.taskOfAgent(agentId);
+    if (status !== before) {
+      if (status === "done") await this.notify("agent_done", `${agent.name} finished`, detail, `agents/${agentId}`);
+      if (status === "failed") await this.notify("agent_failed", `${agent.name} failed`, detail, `agents/${agentId}`);
+    }
+    if (task && task.status !== "closed") {
+      if (status === "done") await this.setTaskStatus(task, "done");
+      else if (status === "review") await this.setTaskStatus(task, "in_review");
+      else if (status === "failed" || status === "cancelled") {
+        // Back on the board so it can be launched again.
+        task.agentId = null;
+        task.assignee = null;
+        await this.setTaskStatus(task, "open");
+      } else if (task.status !== "in_progress") await this.setTaskStatus(task, "in_progress");
+    }
   }
 
   async cancelAgent(agentId: string, by: string): Promise<void> {
@@ -551,6 +605,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       intent.files = input.files.map((f) => f.path);
       intent.attempts++;
     } else {
+      const task = this.taskOfAgent(agentId);
       intent = {
         id: crypto.randomUUID().slice(0, 8),
         agentId,
@@ -560,15 +615,27 @@ export class RepoCoordinator extends DurableObject<Env> {
         status: "queued",
         attempts: 1,
         createdAt: Date.now(),
+        goalNumber: task?.goalNumber ?? undefined,
+        taskNumber: task?.number,
       };
       s.intents[intent.id] = intent;
+      if (task) task.intentId = intent.id;
     }
     intent.conflicts = undefined;
     await this.ctx.storage.put(`input:${intent.id}`, input.files);
 
-    if (s.mergeMode === "review") {
+    if (
+      s.mergeMode === "review" &&
+      this.goalOf(intent.taskNumber ? s.tasks[intent.taskNumber] : undefined)?.mode !== "branch"
+    ) {
       intent.status = "review";
       await this.emit({ type: "intent.review", intentId: intent.id, agentId });
+      await this.notify(
+        "review_requested",
+        `Review requested: ${intent.summary}`,
+        `${s.agents[agentId]?.name} submitted an intent.`,
+        "intents",
+      );
       // Nothing lands until a person approves, so do not block other agents meanwhile.
       await this.releaseLeases(agentId);
       return { status: "review", intentId: intent.id };
@@ -654,7 +721,8 @@ export class RepoCoordinator extends DurableObject<Env> {
     intent.status = "merging";
     await this.persist();
 
-    const wd = await this.main();
+    const branch = this.targetOf(intent.taskNumber ? s.tasks[intent.taskNumber] : undefined);
+    const wd = await this.main(branch);
     await this.syncMain(wd);
     using fork = await this.env.ARTIFACTS.get(agent.fork);
 
@@ -704,6 +772,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       intent.check = check;
       await this.emit({ type: "intent.checked", intentId, agentId: intent.agentId, result: check });
       if (check.status === "failed") {
+        await this.notify("check_failed", `Checks failed: ${intent.summary}`, check.log.slice(-300), "intents");
         await resetTo(wd, previous);
         intent.replays = (intent.replays ?? 0) + 1;
         if (intent.replays > MAX_REPLAYS) {
@@ -721,7 +790,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       }
       sha = await this.pushOrRedo(wd, sha, merged, message, author);
     } else {
-      sha = await this.commitToMain(merged, message, author);
+      sha = await this.commitToMain(merged, message, author, branch);
     }
     const commit: CommitInfo = { sha, message: intent.summary, author: agent.name, at: Date.now() };
 
@@ -730,7 +799,8 @@ export class RepoCoordinator extends DurableObject<Env> {
     intent.conflicts = undefined;
     s.stats.merges++;
     if (autoMerged) s.stats.autoMerged++;
-    await this.recordCommit(commit);
+    // Goal branches have their own history; only the default branch feeds the repo's commit list.
+    if (branch === s.branch) await this.recordCommit(commit);
     await this.emit({
       type: "intent.merged",
       intentId,
@@ -753,6 +823,8 @@ export class RepoCoordinator extends DurableObject<Env> {
     const s = this.require();
     const intent = this.requireIntent(intentId);
     if (intent.status !== "merged" || !intent.mergedAs) throw new Error("only merged intents can be reverted");
+    const goal = intent.goalNumber ? s.goals[intent.goalNumber] : undefined;
+    if (goal?.mode === "branch") throw new Error("This intent belongs to a goal branch and cannot be reverted alone.");
     using repo = await this.env.ARTIFACTS.get(s.id);
     const landed = await repo.readCommit(intent.mergedAs);
     const parent = landed?.parents[0];
@@ -794,7 +866,8 @@ export class RepoCoordinator extends DurableObject<Env> {
     const s = this.require();
     s.head = commit.sha;
     s.commits = [commit, ...s.commits].slice(0, MAX_COMMITS);
-    s.files = this.mainWd ? await listFiles(this.mainWd) : s.files;
+    const wd = this.wds.get(s.branch);
+    s.files = wd ? await listFiles(wd) : s.files;
   }
 
   /** Packs the working tree and runs `command` against it in a fresh sandbox. */
@@ -844,9 +917,9 @@ export class RepoCoordinator extends DurableObject<Env> {
       await push(wd, await this.mainRemote());
       return sha;
     } catch (err) {
-      console.warn("push to the default branch failed, recloning", err);
-      this.mainWd = null;
-      const fresh = await this.main();
+      console.warn("push failed, recloning", err);
+      this.wds.delete(wd.branch);
+      const fresh = await this.main(wd.branch);
       const redone = await writeAndCommit(fresh, files, message, author);
       await push(fresh, await this.mainRemote());
       return redone;
@@ -857,17 +930,18 @@ export class RepoCoordinator extends DurableObject<Env> {
     files: Record<string, string | null>,
     message: string,
     author: { name: string; email: string },
+    branch = this.require().branch,
   ) {
     try {
-      const wd = await this.main();
+      const wd = await this.main(branch);
       const sha = await writeAndCommit(wd, files, message, author);
       await push(wd, await this.mainRemote());
       return sha;
     } catch (err) {
       // Someone pushed in between, or the cached clone is stale: start from a fresh clone once.
-      console.warn("push to the default branch failed, recloning", err);
-      this.mainWd = null;
-      const wd = await this.main();
+      console.warn("push failed, recloning", err);
+      this.wds.delete(branch);
+      const wd = await this.main(branch);
       const sha = await writeAndCommit(wd, files, message, author);
       await push(wd, await this.mainRemote());
       return sha;
@@ -878,16 +952,20 @@ export class RepoCoordinator extends DurableObject<Env> {
   private async syncMain(wd: Workdir) {
     const s = this.require();
     const head = await refresh(wd, await this.mainRemote());
-    if (head !== s.head) {
+    if (wd.branch === s.branch && head !== s.head) {
       s.head = head;
       s.files = await listFiles(wd);
       await this.emit({ type: "commit.external", head });
     }
   }
 
-  private async main(): Promise<Workdir> {
-    this.mainWd ??= await cloneRepo(await this.mainRemote(), this.require().branch);
-    return this.mainWd;
+  private async main(branch = this.require().branch): Promise<Workdir> {
+    let wd = this.wds.get(branch);
+    if (!wd) {
+      wd = await cloneRepo(await this.mainRemote(), branch);
+      this.wds.set(branch, wd);
+    }
+    return wd;
   }
 
   private async mainRemote(): Promise<Remote> {
@@ -898,6 +976,334 @@ export class RepoCoordinator extends DurableObject<Env> {
       this.mainToken = { token: token.plaintext, expiresAt: Date.now() + 3600_000 };
     }
     return { url: s.remote, token: this.mainToken.token };
+  }
+
+  // ---- tasks and goals -----------------------------------------------------------
+
+  private taskOfAgent(agentId: string): TaskItem | undefined {
+    return Object.values(this.require().tasks).find((t) => t.agentId === agentId);
+  }
+
+  private goalOf(task?: TaskItem): Goal | undefined {
+    return task?.goalNumber ? this.require().goals[task.goalNumber] : undefined;
+  }
+
+  /** The branch a task's intents merge into. */
+  private targetOf(task?: TaskItem): string {
+    const goal = this.goalOf(task);
+    return goal?.mode === "branch" && goal.branch && goal.status !== "done" ? goal.branch : this.require().branch;
+  }
+
+  private async notify(kind: NotificationKind, title: string, body: string, path = "") {
+    try {
+      const dir = this.env.DIRECTORY.get(this.env.DIRECTORY.idFromName("global"));
+      await dir.notifyOwner(this.require().id, kind, title, body, path);
+    } catch (err) {
+      console.error("notification failed", err);
+    }
+  }
+
+  private async setTaskStatus(task: TaskItem, status: TaskStatus) {
+    if (task.status !== status) {
+      task.status = status;
+      await this.touchTask(task);
+    }
+    await this.updateGoal(task.goalNumber);
+  }
+
+  private async touchTask(task: TaskItem) {
+    task.updatedAt = Date.now();
+    await this.emit({ type: "task.updated", task: { ...task } });
+  }
+
+  private async touchGoal(goal: Goal) {
+    goal.updatedAt = Date.now();
+    await this.emit({ type: "goal.updated", goal: { ...goal } });
+  }
+
+  /** Moves a goal along when its tasks finish (or come back to life). */
+  private async updateGoal(number: number | null) {
+    const goal = number ? this.require().goals[number] : undefined;
+    if (!goal || goal.status === "closed" || goal.status === "done") return;
+    const tasks = Object.values(this.require().tasks).filter((t) => t.goalNumber === goal.number);
+    const finished = tasks.length > 0 && tasks.every((t) => t.status === "done" || t.status === "closed");
+    const anyDone = tasks.some((t) => t.status === "done");
+    let next: Goal["status"];
+    if (!finished) next = "active";
+    else if (!anyDone) next = "closed";
+    else next = goal.mode === "direct" ? "done" : "review";
+    if (next === goal.status) return;
+    goal.status = next;
+    await this.touchGoal(goal);
+    if (next === "review") {
+      await this.notify("goal_review", `Goal #${goal.number} is ready for review`, goal.title, `goals/${goal.number}`);
+    }
+    if (next === "done") {
+      await this.notify("goal_done", `Goal #${goal.number} is done`, goal.title, `goals/${goal.number}`);
+    }
+  }
+
+  private requireTask(number: number): TaskItem {
+    const task = this.require().tasks[number];
+    if (!task) throw new Error("no such task");
+    return task;
+  }
+
+  private requireGoal(number: number): Goal {
+    const goal = this.require().goals[number];
+    if (!goal) throw new Error("no such goal");
+    return goal;
+  }
+
+  private newTask(input: { title: string; body: string; labels?: string[]; goalNumber?: number | null; by: string }) {
+    const s = this.require();
+    const now = Date.now();
+    const task: TaskItem = {
+      number: ++s.nextNumber,
+      title: input.title,
+      body: input.body,
+      labels: input.labels ?? [],
+      status: "open",
+      assignee: null,
+      agentId: null,
+      intentId: null,
+      goalNumber: input.goalNumber ?? null,
+      createdBy: input.by,
+      createdAt: now,
+      updatedAt: now,
+    };
+    s.tasks[task.number] = task;
+    return task;
+  }
+
+  async createTask(input: { title: string; body: string; labels: string[]; goalNumber?: number; by: string }) {
+    if (input.goalNumber) this.requireGoal(input.goalNumber);
+    const task = this.newTask(input);
+    await this.touchTask(task);
+    await this.updateGoal(task.goalNumber);
+    return task;
+  }
+
+  async updateTask(
+    number: number,
+    patch: { title?: string; body?: string; labels?: string[]; status?: "open" | "closed" },
+  ): Promise<TaskItem> {
+    const task = this.requireTask(number);
+    if (patch.title !== undefined) task.title = patch.title;
+    if (patch.body !== undefined) task.body = patch.body;
+    if (patch.labels !== undefined) task.labels = patch.labels;
+    if (patch.status === "closed" && task.status !== "closed") {
+      if (task.agentId) await this.cancelAgent(task.agentId, "task closed").catch(() => undefined);
+      task.status = "closed";
+    } else if (patch.status === "open" && task.status === "closed") task.status = "open";
+    await this.touchTask(task);
+    await this.updateGoal(task.goalNumber);
+    return task;
+  }
+
+  async assignTask(number: number, to: "agent" | "me" | "none", by: string): Promise<TaskItem> {
+    const s = this.require();
+    const task = this.requireTask(number);
+    if (task.status === "closed" || task.status === "done") throw new Error(`task is ${task.status}`);
+    if (to === "agent") {
+      if (task.agentId && !FINISHED.includes(s.agents[task.agentId]?.status))
+        throw new Error("an agent is already on it");
+      if (s.status !== "ready") throw new Error(`repo is ${s.status}`);
+      if (this.activeAgents() >= MAX_ACTIVE_AGENTS) {
+        throw new Error(`At most ${MAX_ACTIVE_AGENTS} agents can run at once.`);
+      }
+      await this.spawn(slug(task.title), this.taskPrompt(task), task.number);
+    } else if (to === "me") {
+      task.assignee = `user:${by}`;
+      task.status = "in_progress";
+      await this.touchTask(task);
+    } else {
+      if (task.agentId) await this.cancelAgent(task.agentId, `unassigned by ${by}`);
+      task.assignee = null;
+      task.agentId = null;
+      task.status = "open";
+      await this.touchTask(task);
+    }
+    await this.updateGoal(task.goalNumber);
+    return task;
+  }
+
+  private taskPrompt(task: TaskItem): string {
+    const goal = this.goalOf(task);
+    const context = goal
+      ? `This task is part of goal #${goal.number} "${goal.title}"${goal.summary ? `: ${goal.summary}` : ""}. Other agents work on the goal's other tasks at the same time.`
+      : "";
+    return [`#${task.number} ${task.title}`, task.body, context].filter(Boolean).join("\n\n");
+  }
+
+  /** Creates a goal with a task per entry; with `launch`, one agent per task right away. */
+  async createGoal(input: {
+    title: string;
+    summary: string;
+    mode: GoalMode;
+    by: string;
+    tasks: { name?: string; task: string; files?: string[] }[];
+    launch: boolean;
+  }): Promise<Goal> {
+    const s = this.require();
+    if (s.status !== "ready") throw new Error(`repo is ${s.status}`);
+    if (input.launch && this.activeAgents() + input.tasks.length > MAX_ACTIVE_AGENTS) {
+      throw new Error(`At most ${MAX_ACTIVE_AGENTS} agents can run at once (${this.activeAgents()} running).`);
+    }
+    const now = Date.now();
+    const number = ++s.nextNumber;
+    const goal: Goal = {
+      number,
+      title: input.title,
+      summary: input.summary,
+      mode: input.mode,
+      branch: null,
+      baseCommit: null,
+      status: "active",
+      createdBy: input.by,
+      createdAt: now,
+      updatedAt: now,
+    };
+    if (input.mode === "branch") {
+      const wd = await this.main();
+      await this.syncMain(wd);
+      goal.baseCommit = await headOf(wd);
+      goal.branch = `goal/${number}-${slug(input.title)}`;
+      await push(wd, await this.mainRemote(), { remoteRef: goal.branch });
+    }
+    s.goals[number] = goal;
+    await this.touchGoal(goal);
+    const created = input.tasks.map((t) => {
+      const body = [t.task, t.files?.length ? `Files: ${t.files.join(", ")}` : ""].filter(Boolean).join("\n\n");
+      return this.newTask({ title: titleOf(t.task), body, goalNumber: number, by: input.by });
+    });
+    for (const task of created) await this.touchTask(task);
+    if (input.launch) {
+      for (const [i, task] of created.entries()) {
+        await this.spawn(input.tasks[i].name || slug(task.title), this.taskPrompt(task), task.number);
+      }
+    }
+    return goal;
+  }
+
+  async closeGoal(number: number): Promise<Goal> {
+    const s = this.require();
+    const goal = this.requireGoal(number);
+    if (goal.status === "done") throw new Error("goal is already done");
+    for (const task of Object.values(s.tasks)) {
+      if (task.goalNumber !== number || task.status === "closed" || task.status === "done") continue;
+      if (task.agentId) await this.cancelAgent(task.agentId, "goal closed").catch(() => undefined);
+      task.status = "closed";
+      await this.touchTask(task);
+    }
+    goal.status = "closed";
+    await this.touchGoal(goal);
+    return goal;
+  }
+
+  /** The goal's combined change: files touched by its landed intents, goal branch against where it started. */
+  async goalDiff(number: number): Promise<{ base: string | null; head: string | null; files: FileChange[] }> {
+    const s = this.require();
+    const goal = this.requireGoal(number);
+    if (goal.mode !== "branch" || !goal.branch || !goal.baseCommit) return { base: null, head: null, files: [] };
+    const paths = new Set<string>();
+    for (const i of Object.values(s.intents)) {
+      if (i.goalNumber === number && i.status === "merged") i.files.forEach((f) => paths.add(f));
+    }
+    using repo = await this.env.ARTIFACTS.get(s.id);
+    const read = async (ref: string, path: string) => {
+      const blob = await repo.readFile({ ref, path });
+      return blob ? blob.text() : null;
+    };
+    const files: FileChange[] = [];
+    for (const path of [...paths].sort()) {
+      const before = await read(goal.baseCommit, path);
+      const after = await read(goal.branch, path);
+      if (before === after) continue;
+      files.push({ path, status: before === null ? "added" : after === null ? "deleted" : "modified", before, after });
+    }
+    const [head] = await repo.log({ ref: goal.branch, limit: 1 });
+    return { base: goal.baseCommit, head: head?.hash ?? null, files };
+  }
+
+  /** Lands a reviewed goal branch on the default branch as one commit (3-way per file, checked first). */
+  async mergeGoal(
+    number: number,
+    by: string,
+  ): Promise<
+    | { status: "merged"; commit: string }
+    | { status: "conflict"; files: string[] }
+    | { status: "check_failed"; log: string }
+  > {
+    const run = this.mergeChain.then(() => this.mergeGoalNow(number, by));
+    this.mergeChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private async mergeGoalNow(number: number, by: string) {
+    const s = this.require();
+    const goal = this.requireGoal(number);
+    if (goal.mode !== "branch" || !goal.branch || goal.status !== "review") {
+      throw new Error("this goal is not waiting for review");
+    }
+    const main = await this.main();
+    await this.syncMain(main);
+    const gwd = await this.main(goal.branch);
+    await this.syncMain(gwd);
+
+    const intents = Object.values(s.intents).filter((i) => i.goalNumber === number && i.status === "merged");
+    const paths = [...new Set(intents.flatMap((i) => i.files))];
+    using repo = await this.env.ARTIFACTS.get(s.id);
+    const merged: Record<string, string | null> = {};
+    const conflicts: string[] = [];
+    for (const path of paths) {
+      const blob = await repo.readFile({ ref: goal.baseCommit!, path });
+      const ours = await readText(main, path);
+      const result = mergeFile(blob ? await blob.text() : null, ours, await readText(gwd, path));
+      if (!result.clean) conflicts.push(path);
+      else if (result.text !== ours) merged[path] = result.text;
+    }
+    if (conflicts.length) {
+      goal.mergeError = `Conflicts with changes on ${s.branch} in: ${conflicts.join(", ")}`;
+      await this.touchGoal(goal);
+      return { status: "conflict" as const, files: conflicts };
+    }
+
+    const message = [
+      `${goal.title} (goal #${goal.number})`,
+      goal.summary,
+      intents.map((i) => `- ${i.summary}`).join("\n"),
+      `Hive-Goal: ${goal.number}`,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    const author = { name: by, email: `${by}@users.hive.dev` };
+    let sha: string;
+    if (s.checkCommand) {
+      const previous = await headOf(main);
+      sha = await writeAndCommit(main, merged, message, author);
+      const check = await this.runCheck(main, s.checkCommand);
+      goal.check = check;
+      if (check.status === "failed") {
+        await resetTo(main, previous);
+        goal.mergeError = "Checks failed on the merged result.";
+        await this.touchGoal(goal);
+        await this.notify("check_failed", `Checks failed: goal #${number}`, check.log.slice(-300), `goals/${number}`);
+        return { status: "check_failed" as const, log: check.log };
+      }
+      sha = await this.pushOrRedo(main, sha, merged, message, author);
+    } else {
+      sha = await this.commitToMain(merged, message, author);
+    }
+    goal.status = "done";
+    goal.mergedAs = sha;
+    goal.mergeError = undefined;
+    s.stats.merges++;
+    await this.recordCommit({ sha, message: `${goal.title} (goal #${number})`, author: by, at: Date.now() });
+    await this.touchGoal(goal);
+    await this.notify("goal_done", `Goal #${number} merged`, goal.title, `goals/${number}`);
+    this.wds.delete(goal.branch);
+    return { status: "merged" as const, commit: sha };
   }
 
   // ---- GitHub round trip ------------------------------------------------------
@@ -1012,6 +1418,8 @@ export class RepoCoordinator extends DurableObject<Env> {
       intents: Object.values(s.intents)
         .map(({ replays: _replays, ...intent }) => intent)
         .sort((a, b) => b.createdAt - a.createdAt),
+      tasks: Object.values(s.tasks),
+      goals: Object.values(s.goals),
       commits: s.commits,
       stats: s.stats,
       events: s.events.slice(-150),
@@ -1024,6 +1432,19 @@ function githubLink(s: Persisted): GithubLink | null {
   if (!m) return null;
   return { repo: `${m[1]}/${m[2]}`, base: s.importBase ?? null, pullRequests: s.pullRequests ?? [] };
 }
+
+const titleOf = (text: string) => {
+  const line = text.trim().split("\n")[0];
+  return line.length > 80 ? `${line.slice(0, 77)}…` : line;
+};
+
+const slug = (text: string) =>
+  text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 24)
+    .replace(/-$/, "") || "task";
 
 /** isomorphic-git reports some failures as one error wrapping several; surface the first real cause. */
 function errorMessage(err: unknown): string {

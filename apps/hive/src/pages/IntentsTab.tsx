@@ -65,6 +65,16 @@ function IntentCard({ intent, highlighted }: { intent: Intent; highlighted: bool
       <div className="intent-head">
         <span className={`pill intent-${intent.status}`}>{INTENT_LABEL[intent.status]}</span>
         <h3>{intent.summary}</h3>
+        {intent.goalNumber != null && (
+          <Link className="pill" to={`/${owner}/${name}/goals/${intent.goalNumber}`}>
+            goal #{intent.goalNumber}
+          </Link>
+        )}
+        {intent.taskNumber != null && (
+          <Link className="pill" to={`/${owner}/${name}/tasks/${intent.taskNumber}`}>
+            task #{intent.taskNumber}
+          </Link>
+        )}
       </div>
       <div className="muted small intent-meta">
         by{" "}

@@ -76,6 +76,53 @@ export interface Intent {
   reviewComment?: string;
   /** The latest check run against the merged result. */
   check?: CheckResult;
+  /** The goal and task this intent belongs to, when it was launched from one. */
+  goalNumber?: number;
+  taskNumber?: number;
+}
+
+export type TaskStatus = "open" | "in_progress" | "in_review" | "done" | "closed";
+
+/** An issue for agents and people. Tasks and goals share one numbering (#1, #2, …) per repo. */
+export interface TaskItem {
+  number: number;
+  title: string;
+  body: string;
+  labels: string[];
+  status: TaskStatus;
+  /** `agent:<agentId>`, `user:<login>` or null. */
+  assignee: string | null;
+  agentId: string | null;
+  intentId: string | null;
+  goalNumber: number | null;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** `direct`: each intent lands on the default branch as it merges. `branch`: intents land on `goal/<slug>`, reviewed and merged as one unit. */
+export type GoalMode = "direct" | "branch";
+/** `active`: tasks open or running. `review`: all tasks finished, branch waiting to be merged. `done`: finished (direct) or merged (branch). */
+export type GoalStatus = "active" | "review" | "done" | "closed";
+
+export interface Goal {
+  number: number;
+  title: string;
+  summary: string;
+  mode: GoalMode;
+  /** `goal/<slug>` for branch goals. */
+  branch: string | null;
+  /** Default-branch commit the goal branch started from. */
+  baseCommit: string | null;
+  status: GoalStatus;
+  /** Commit on the default branch the goal landed as (branch mode). */
+  mergedAs?: string;
+  /** Why the last merge attempt did not land: conflicting files or a failed check. */
+  mergeError?: string;
+  check?: CheckResult;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface RepoStats {
@@ -115,6 +162,8 @@ export type HiveEventBody =
   | { type: "intent.rejected"; intentId: string; agentId: string; reason: string }
   | { type: "intent.reverted"; intentId: string; agentId: string; commit: CommitInfo; by: string }
   | { type: "commit.external"; head: string }
+  | { type: "task.updated"; task: TaskItem }
+  | { type: "goal.updated"; goal: Goal }
   | { type: "github.synced"; upstream: string; commit: CommitInfo | null; by: string }
   | { type: "github.pr"; pr: PullRequestInfo; by: string };
 
@@ -141,6 +190,8 @@ export interface RepoState {
   agents: AgentInfo[];
   leases: Lease[];
   intents: Intent[];
+  tasks: TaskItem[];
+  goals: Goal[];
   commits: CommitInfo[];
   stats: RepoStats;
   events: HiveEvent[];

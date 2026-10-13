@@ -2096,3 +2096,211 @@ a.agent-name {
 .launcher-note {
   margin: 0;
 }
+
+/* ---- tasks, goals, inbox ------------------------------------------------------- */
+
+.board {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(220px, 1fr);
+  gap: 12px;
+  overflow-x: auto;
+}
+
+.board-col {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.board-col h3 {
+  font-size: 13px;
+  margin: 0;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.task-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+}
+
+.task-card:hover {
+  border-color: var(--border-strong);
+  text-decoration: none;
+}
+
+.task-card-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.tasks-head,
+.task-page,
+.goal-page,
+.inbox {
+  margin-bottom: 14px;
+}
+
+.task-page,
+.goal-page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.task-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.task-meta {
+  margin-bottom: 8px;
+}
+
+.task-in_progress,
+.goal-active {
+  border-color: rgba(108, 182, 255, 0.5);
+  color: var(--link);
+}
+
+.task-in_review,
+.goal-review {
+  border-color: rgba(245, 165, 36, 0.6);
+  color: var(--honey);
+}
+
+.task-done,
+.goal-done {
+  border-color: rgba(63, 185, 80, 0.6);
+  color: var(--good);
+}
+
+.progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.progress-bar {
+  width: 120px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.progress-bar span {
+  display: block;
+  height: 100%;
+  background: var(--good);
+}
+
+.goal-list,
+.goal-tasks,
+.inbox-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.goal-tasks li {
+  padding: 4px 0;
+}
+
+.bell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+}
+
+.bell:hover {
+  color: var(--text);
+  text-decoration: none;
+}
+
+.inbox-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.inbox-item:hover {
+  background: var(--hover);
+}
+
+.inbox-item.unread {
+  border-left: 3px solid var(--honey);
+  background: var(--panel-2);
+}
+
+.inbox-icon {
+  width: 22px;
+  text-align: center;
+}
+
+.inbox-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.activity {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.activity h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.activity section > div {
+  padding: 2px 0;
+}
+
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

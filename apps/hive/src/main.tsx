@@ -8,12 +8,15 @@ import { AgentsTab } from "./pages/AgentsTab.tsx";
 import { CodeTab } from "./pages/CodeTab.tsx";
 import { CommitPage } from "./pages/CommitPage.tsx";
 import { CommitsTab } from "./pages/CommitsTab.tsx";
+import { GoalPage, GoalsTab } from "./pages/GoalsTab.tsx";
 import { GithubTab } from "./pages/GithubTab.tsx";
 import { Home } from "./pages/Home.tsx";
+import { InboxPage } from "./pages/InboxPage.tsx";
 import { IntentsTab } from "./pages/IntentsTab.tsx";
 import { NewRepo } from "./pages/NewRepo.tsx";
 import { RepoLayout } from "./pages/RepoLayout.tsx";
 import { SettingsTab } from "./pages/SettingsTab.tsx";
+import { TaskPage, TasksTab } from "./pages/TasksTab.tsx";
 import { NotFound, RouteError, Shell } from "./pages/Shell.tsx";
 import { UserPage } from "./pages/UserPage.tsx";
 import { SessionProvider } from "./session.tsx";
@@ -25,6 +28,7 @@ const router = createBrowserRouter([
     children: [
       { index: true, element: <Home /> },
       { path: "new", element: <NewRepo /> },
+      { path: "inbox", element: <InboxPage /> },
       { path: ":owner", element: <UserPage /> },
       {
         path: ":owner/:name",
@@ -35,6 +39,10 @@ const router = createBrowserRouter([
           { path: "commit/:sha", element: <CommitPage /> },
           { path: "agents", element: <AgentsTab /> },
           { path: "agents/:agentId", element: <AgentPage /> },
+          { path: "tasks", element: <TasksTab /> },
+          { path: "tasks/:number", element: <TaskPage /> },
+          { path: "goals", element: <GoalsTab /> },
+          { path: "goals/:number", element: <GoalPage /> },
           { path: "intents", element: <IntentsTab /> },
           { path: "github", element: <GithubTab /> },
           { path: "settings", element: <SettingsTab /> },

@@ -41,6 +41,12 @@ function Header() {
             <Link to="/new" className="btn btn-sm">
               + New
             </Link>
+            <Link to="/inbox" className="bell" aria-label={`Inbox, ${me.unread ?? 0} unread`}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10 21h4" />
+              </svg>
+              {!!me.unread && <span className="count live">{me.unread}</span>}
+            </Link>
             <div className="menu" ref={menu}>
               <button className="menu-trigger" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
                 <Avatar src={me.user.avatarUrl} size={26} alt={me.user.login} />

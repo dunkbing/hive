@@ -39,6 +39,7 @@ function LoadedRepo(props: { owner: string; name: string; repo: RepoRecord; canW
   const [cloneOpen, setCloneOpen] = useState(false);
   const { state } = live;
   const running = state.agents.filter((a) => isRunning(a.status)).length;
+  const openTasks = state.tasks.filter((t) => t.status === "open").length;
   const reviews = state.intents.filter((i) => i.status === "review").length;
 
   const ctx: RepoContext = { owner, name, repo, setRepo, canWrite, ...live };
@@ -74,6 +75,14 @@ function LoadedRepo(props: { owner: string; name: string; repo: RepoRecord; canW
           Agents
           {running > 0 && <span className="count live">{running}</span>}
           {running === 0 && state.agents.length > 0 && <span className="count">{state.agents.length}</span>}
+        </NavLink>
+        <NavLink to={`/${owner}/${name}/tasks`}>
+          Tasks
+          {openTasks > 0 && <span className="count">{openTasks}</span>}
+        </NavLink>
+        <NavLink to={`/${owner}/${name}/goals`}>
+          Goals
+          {state.goals.length > 0 && <span className="count">{state.goals.length}</span>}
         </NavLink>
         <NavLink to={`/${owner}/${name}/intents`}>
           Intents

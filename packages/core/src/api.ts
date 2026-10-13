@@ -14,6 +14,29 @@ export interface Me {
   dailyAgentLimit?: number | null;
   /** Whether the user granted repository access on GitHub (for pull requests). */
   githubConnected?: boolean;
+  /** Unread inbox notifications. */
+  unread?: number;
+}
+
+export type NotificationKind =
+  | "review_requested"
+  | "check_failed"
+  | "agent_done"
+  | "agent_failed"
+  | "goal_review"
+  | "goal_done";
+
+export interface Notification {
+  id: number;
+  kind: NotificationKind;
+  /** owner/name of the repository it is about. */
+  repo: string;
+  title: string;
+  body: string;
+  /** In-app path, e.g. /owner/name/goals/3. */
+  link: string;
+  createdAt: number;
+  read: boolean;
 }
 
 export type Visibility = "public" | "private";

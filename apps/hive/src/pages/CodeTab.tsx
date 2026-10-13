@@ -5,6 +5,7 @@ import { api, useLoad } from "../api.ts";
 import { CodeView, ErrorBox, Markdown, Spinner, parseMessage, timeAgo } from "../components.tsx";
 import { useSession } from "../session.tsx";
 import { useRepo } from "./RepoLayout.tsx";
+import { GoalStatusPill, Progress, goalProgress } from "./TasksTab.tsx";
 
 /**
  * File browser. Query params: `path` selects a file, `ref` a branch, tag or commit, `fork` an agent's fork,
@@ -102,6 +103,7 @@ export function CodeTab() {
         <div className="code-layout">
           <FileTree entries={tree.data.entries} selected={path} onSelect={(p) => select({ path: p, q: null })} />
           <div className="code-main">
+            {!path && !q && !fork && !ref && <Activity />}
             {q && !fork && !ref ? (
               <SearchResults q={q} onOpen={(p) => select({ path: p, q: null })} />
             ) : path ? (
@@ -117,6 +119,74 @@ export function CodeTab() {
             {tree.data.truncated && <p className="muted small">Only the first 5000 entries are shown.</p>}
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+/** Repo home: what is going on, shown above the README when there is anything to show. */
+function Activity() {
+  const { owner, name, state } = useRepo();
+  const base = `/${owner}/${name}`;
+  const goals = state.goals
+    .filter((g) => g.status === "active" || g.status === "review")
+    .slice(-3)
+    .reverse();
+  const tasks = state.tasks.filter((t) => t.status === "open").slice(0, 5);
+  const reviews = state.intents.filter((i) => i.status === "review");
+  const commits = state.commits.slice(0, 5);
+  if (!goals.length && !tasks.length && !reviews.length && !commits.length) return null;
+  return (
+    <div className="activity">
+      {goals.length > 0 && (
+        <section>
+          <h4>Goals</h4>
+          {goals.map((g) => {
+            const { done, total } = goalProgress(g.number, state.tasks);
+            return (
+              <div key={g.number} className="row">
+                <Link className="grow" to={`${base}/goals/${g.number}`}>
+                  {g.title}
+                </Link>
+                <GoalStatusPill goal={g} />
+                <Progress done={done} total={total} />
+              </div>
+            );
+          })}
+        </section>
+      )}
+      {reviews.length > 0 && (
+        <section>
+          <h4>Reviews waiting</h4>
+          <Link to={`${base}/intents`}>
+            {reviews.length} intent{reviews.length === 1 ? "" : "s"} awaiting review
+          </Link>
+        </section>
+      )}
+      {tasks.length > 0 && (
+        <section>
+          <h4>Open tasks</h4>
+          {tasks.map((t) => (
+            <div key={t.number}>
+              <Link to={`${base}/tasks/${t.number}`}>
+                <span className="muted">#{t.number}</span> {t.title}
+              </Link>
+            </div>
+          ))}
+        </section>
+      )}
+      {commits.length > 0 && (
+        <section>
+          <h4>Latest merges</h4>
+          {commits.map((c) => (
+            <div key={c.sha} className="row">
+              <Link className="grow ellipsis" to={`${base}/commit/${c.sha}`}>
+                {parseMessage(c.message).subject}
+              </Link>
+              <span className="muted small">{timeAgo(c.at)}</span>
+            </div>
+          ))}
+        </section>
       )}
     </div>
   );

@@ -19,6 +19,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   useEffect(refresh, [refresh]);
 
+  // Keep the inbox badge fresh while signed in.
+  const signedIn = !!me?.user;
+  useEffect(() => {
+    if (!signedIn) return;
+    const id = setInterval(refresh, 20_000);
+    return () => clearInterval(id);
+  }, [signedIn, refresh]);
+
   const signOut = useCallback(async () => {
     await api.logout();
     setMe({ user: null });

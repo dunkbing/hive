@@ -3,13 +3,19 @@ import type {
   CommitDetail,
   CommitInfo,
   CommitSummary,
+  FileChange,
+  Goal,
+  GoalMode,
   HiveEvent,
   Me,
   MergeMode,
+  Notification,
   Plan,
   PullRequestInfo,
   RepoRecord,
   RepoState,
+  TaskItem,
+  TaskStatus,
   TranscriptStep,
   Tree,
   Visibility,
@@ -144,6 +150,41 @@ export const api = {
       | { status: "synced"; commit: CommitInfo | null; files: number; skipped?: string[] }
       | { status: "conflict"; files: string[] }
     >(`${repoPath(owner, name)}/github/sync`, { method: "POST" }),
+  createTask: (
+    owner: string,
+    name: string,
+    body: { title: string; body?: string; labels?: string[]; goalNumber?: number },
+  ) => call<TaskItem>(`${repoPath(owner, name)}/tasks`, { method: "POST", body: JSON.stringify(body) }),
+  updateTask: (
+    owner: string,
+    name: string,
+    n: number,
+    body: { title?: string; body?: string; labels?: string[]; status?: Extract<TaskStatus, "open" | "closed"> },
+  ) => call<TaskItem>(`${repoPath(owner, name)}/tasks/${n}`, { method: "PATCH", body: JSON.stringify(body) }),
+  assignTask: (owner: string, name: string, n: number, to: "agent" | "me" | "none") =>
+    call<TaskItem>(`${repoPath(owner, name)}/tasks/${n}/assign`, { method: "POST", body: JSON.stringify({ to }) }),
+  createGoal: (
+    owner: string,
+    name: string,
+    body: {
+      goal: string;
+      summary?: string;
+      mode: GoalMode;
+      tasks: { name?: string; task: string; files?: string[] }[];
+      launch: boolean;
+    },
+  ) => call<Goal>(`${repoPath(owner, name)}/goals`, { method: "POST", body: JSON.stringify(body) }),
+  mergeGoal: (owner: string, name: string, n: number) =>
+    call<{ status: "merged" | "conflict" | "check_failed"; files?: string[]; log?: string }>(
+      `${repoPath(owner, name)}/goals/${n}/merge`,
+      { method: "POST" },
+    ),
+  closeGoal: (owner: string, name: string, n: number) =>
+    call<Goal>(`${repoPath(owner, name)}/goals/${n}/close`, { method: "POST" }),
+  goalDiff: (owner: string, name: string, n: number) =>
+    call<{ base: string | null; head: string | null; files: FileChange[] }>(`${repoPath(owner, name)}/goals/${n}/diff`),
+  inbox: () => call<{ items: Notification[]; unread: number }>("/inbox"),
+  markRead: (ids?: number[]) => call<{ ok: true }>("/inbox/read", { method: "POST", body: JSON.stringify({ ids }) }),
   disconnectGithub: () => call<{ ok: true }>("/me/github", { method: "DELETE" }),
   deleteRepo: (owner: string, name: string) => call<{ ok: true }>(repoPath(owner, name), { method: "DELETE" }),
 };

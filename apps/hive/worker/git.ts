@@ -143,14 +143,14 @@ export async function search(wd: Workdir, pattern: RegExp, opts: { prefix?: stri
   return { matches, truncated: false };
 }
 
-export async function push(wd: Workdir, remote: Remote, opts: { force?: boolean } = {}) {
+export async function push(wd: Workdir, remote: Remote, opts: { force?: boolean; remoteRef?: string } = {}) {
   const result = await git.push({
     fs: wd.fs,
     dir: wd.dir,
     http,
     url: remote.url,
     ref: wd.branch,
-    remoteRef: wd.branch,
+    remoteRef: opts.remoteRef ?? wd.branch,
     force: opts.force,
     onAuth: onAuth(remote),
   });

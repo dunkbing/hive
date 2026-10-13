@@ -1,4 +1,4 @@
-import type { RepoRecord, User, Visibility } from "@hive/core";
+import type { Notification, NotificationKind, RepoRecord, User, Visibility } from "@hive/core";
 import { DurableObject } from "cloudflare:workers";
 
 const SESSION_TTL_MS = 30 * 24 * 3600_000;
@@ -28,6 +28,12 @@ export class Directory extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS usage (
         user_id TEXT NOT NULL, day TEXT NOT NULL, agents INTEGER NOT NULL, PRIMARY KEY (user_id, day)
       );
+      CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, repo TEXT NOT NULL, kind TEXT NOT NULL,
+        title TEXT NOT NULL, body TEXT NOT NULL, link TEXT NOT NULL, created_at INTEGER NOT NULL,
+        read INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS notifications_user ON notifications(user_id, id);
       CREATE TABLE IF NOT EXISTS github_tokens (
         user_id TEXT PRIMARY KEY, sealed TEXT NOT NULL, scope TEXT NOT NULL, updated_at INTEGER NOT NULL
       );
@@ -210,5 +216,67 @@ export class Directory extends DurableObject<Env> {
         .exec<{ agents: number }>("SELECT agents FROM usage WHERE user_id = ? AND day = ?", userId, day)
         .toArray()[0]?.agents ?? 0
     );
+  }
+
+  // ---- inbox -----------------------------------------------------------------
+
+  /** Notifies the owner of repo `repoId`. `path` is relative to the repository page, e.g. `goals/3`. */
+  notifyOwner(repoId: string, kind: NotificationKind, title: string, body: string, path = ""): void {
+    const repo = this.getRepoById(repoId);
+    if (!repo) return;
+    this.sql.exec(
+      "INSERT INTO notifications (user_id, repo, kind, title, body, link, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      repo.ownerId,
+      `${repo.owner}/${repo.name}`,
+      kind,
+      title.slice(0, 200),
+      body.slice(0, 500),
+      `/${repo.owner}/${repo.name}${path ? `/${path}` : ""}`,
+      Date.now(),
+    );
+    // Keep the inbox bounded.
+    this.sql.exec(
+      "DELETE FROM notifications WHERE user_id = ? AND id <= (SELECT MAX(id) FROM notifications WHERE user_id = ?) - 200",
+      repo.ownerId,
+      repo.ownerId,
+    );
+  }
+
+  listNotifications(userId: string, limit = 100): Notification[] {
+    return this.sql
+      .exec<{
+        id: number;
+        kind: NotificationKind;
+        repo: string;
+        title: string;
+        body: string;
+        link: string;
+        created_at: number;
+        read: number;
+      }>("SELECT * FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT ?", userId, limit)
+      .toArray()
+      .map((r) => ({
+        id: r.id,
+        kind: r.kind,
+        repo: r.repo,
+        title: r.title,
+        body: r.body,
+        link: r.link,
+        createdAt: r.created_at,
+        read: r.read === 1,
+      }));
+  }
+
+  unreadCount(userId: string): number {
+    return this.sql
+      .exec<{ n: number }>("SELECT COUNT(*) AS n FROM notifications WHERE user_id = ? AND read = 0", userId)
+      .one().n;
+  }
+
+  /** Marks the given notifications read, or all of the user's when `ids` is omitted. */
+  markRead(userId: string, ids?: number[]): void {
+    if (!ids) this.sql.exec("UPDATE notifications SET read = 1 WHERE user_id = ?", userId);
+    else
+      for (const id of ids) this.sql.exec("UPDATE notifications SET read = 1 WHERE user_id = ? AND id = ?", userId, id);
   }
 }

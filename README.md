@@ -39,6 +39,16 @@ Built for the Cloudflare "Build the next GitHub" challenge, on **Workers**, **Du
   fresh Linux sandbox against the exact tree that would land. A failing check goes back to the agent with the output
   instead of merging.
 
+**Keep work in the repo**
+
+- **Tasks.** A board (open, in progress, in review, done) of issues for agents and people, with labels. Launch an
+  agent on a task or take it yourself; an agent's intent links to its task and merging it moves the task to done.
+- **Goals.** A planned goal is a workstream that owns its tasks, with progress, agents, intents, checks and a combined
+  diff. Per goal: land each intent as it merges, or land on a goal branch (`goal/<n>-<slug>`) and review and merge the
+  whole goal into the default branch as one commit.
+- **Inbox.** A bell and an Inbox page: review requested, check failed, agent finished or failed, goal ready or done.
+- **Repo home.** The Code tab shows active goals, open tasks, reviews waiting and the latest merges above the README.
+
 **Work like on GitHub**
 
 - **Sign in with GitHub.** Repositories belong to your account; private repositories are invisible to everyone else.
@@ -175,34 +185,38 @@ vp run -r test      # unit tests (leases, 3-way merge)
 
 All routes are under `/api`. Writes need a session cookie and the `Origin` of the deployment.
 
-| Method | Route                                     | Access    | Description                                            |
-| ------ | ----------------------------------------- | --------- | ------------------------------------------------------ |
-| GET    | `/me`                                     | anyone    | Current user and daily allowance                       |
-| GET    | `/repos`                                  | signed in | Your repositories                                      |
-| POST   | `/repos`                                  | signed in | Create `{ name, description, visibility, source }`     |
-| GET    | `/explore`                                | anyone    | Recent public repositories                             |
-| GET    | `/users/:owner/repos`                     | anyone    | A user's visible repositories                          |
-| GET    | `/repos/:owner/:name`                     | readers   | Repository and live coordination state                 |
-| GET    | `/repos/:owner/:name/ws`                  | readers   | WebSocket: `{ event, state }` on every change          |
-| GET    | `/repos/:owner/:name/tree?ref=&fork=`     | readers   | File tree                                              |
-| GET    | `/repos/:owner/:name/blob?path=&ref=`     | readers   | File content                                           |
-| GET    | `/repos/:owner/:name/commits?ref=`        | readers   | History                                                |
-| GET    | `/repos/:owner/:name/commit/:sha`         | readers   | Commit with per-file before/after                      |
-| GET    | `/repos/:owner/:name/clone`               | readers   | `git clone` command with a 1h read token               |
-| POST   | `/repos/:owner/:name/agents`              | owner     | Launch agents `{ tasks: [{ task }] }`                  |
-| POST   | `/repos/:owner/:name/settings`            | owner     | `{ description?, visibility?, leasesEnabled? }`        |
-| DELETE | `/repos/:owner/:name`                     | owner     | Delete the repository and all forks                    |
-| POST   | `/repos/:owner/:name/plan`                | owner     | Plan a goal into parallel tasks `{ goal }`             |
-| GET    | `/repos/:owner/:name/agents/:id`          | readers   | An agent and its transcript (`?after=`)                |
-| POST   | `/repos/:owner/:name/agents/:id/cancel`   | owner     | Cancel an agent                                        |
-| POST   | `/repos/:owner/:name/agents/:id/message`  | owner     | Message an agent `{ message }`                         |
-| POST   | `/repos/:owner/:name/intents/:id/approve` | owner     | Approve and merge (also `changes`, `reject`, `revert`) |
-| GET    | `/repos/:owner/:name/blame?path=`         | readers   | Line-by-line authorship                                |
-| GET    | `/repos/:owner/:name/search?q=`           | readers   | Regex code search on the default branch                |
-| GET    | `/repos/:owner/:name/refs`                | readers   | Branches and tags                                      |
-| POST   | `/repos/:owner/:name/leases`              | owner     | Lease a file by hand `{ path }` (DELETE releases)      |
-| POST   | `/repos/:owner/:name/github/pr`           | owner     | Open a pull request on the GitHub source               |
-| POST   | `/repos/:owner/:name/github/sync`         | owner     | Sync new upstream commits into Hive                    |
+| Method | Route                                     | Access    | Description                                                                                                    |
+| ------ | ----------------------------------------- | --------- | -------------------------------------------------------------------------------------------------------------- |
+| GET    | `/me`                                     | anyone    | Current user and daily allowance                                                                               |
+| GET    | `/repos`                                  | signed in | Your repositories                                                                                              |
+| POST   | `/repos`                                  | signed in | Create `{ name, description, visibility, source }`                                                             |
+| GET    | `/explore`                                | anyone    | Recent public repositories                                                                                     |
+| GET    | `/users/:owner/repos`                     | anyone    | A user's visible repositories                                                                                  |
+| GET    | `/repos/:owner/:name`                     | readers   | Repository and live coordination state                                                                         |
+| GET    | `/repos/:owner/:name/ws`                  | readers   | WebSocket: `{ event, state }` on every change                                                                  |
+| GET    | `/repos/:owner/:name/tree?ref=&fork=`     | readers   | File tree                                                                                                      |
+| GET    | `/repos/:owner/:name/blob?path=&ref=`     | readers   | File content                                                                                                   |
+| GET    | `/repos/:owner/:name/commits?ref=`        | readers   | History                                                                                                        |
+| GET    | `/repos/:owner/:name/commit/:sha`         | readers   | Commit with per-file before/after                                                                              |
+| GET    | `/repos/:owner/:name/clone`               | readers   | `git clone` command with a 1h read token                                                                       |
+| POST   | `/repos/:owner/:name/agents`              | owner     | Launch agents `{ tasks: [{ task }] }`                                                                          |
+| GET    | `/inbox`                                  | signed in | Notifications and unread count (`POST /inbox/read`)                                                            |
+| POST   | `/repos/:owner/:name/tasks`               | owner     | Create a task `{ title, body?, labels? }` (PATCH `/tasks/:n`, POST `/tasks/:n/assign { to: agent\|me\|none }`) |
+| POST   | `/repos/:owner/:name/goals`               | owner     | Create a goal with tasks `{ goal, mode, tasks, launch }`                                                       |
+| POST   | `/repos/:owner/:name/goals/:n/merge`      | owner     | Merge a reviewed goal branch (also `close`; GET `diff`)                                                        |
+| POST   | `/repos/:owner/:name/settings`            | owner     | `{ description?, visibility?, leasesEnabled? }`                                                                |
+| DELETE | `/repos/:owner/:name`                     | owner     | Delete the repository and all forks                                                                            |
+| POST   | `/repos/:owner/:name/plan`                | owner     | Plan a goal into parallel tasks `{ goal }`                                                                     |
+| GET    | `/repos/:owner/:name/agents/:id`          | readers   | An agent and its transcript (`?after=`)                                                                        |
+| POST   | `/repos/:owner/:name/agents/:id/cancel`   | owner     | Cancel an agent                                                                                                |
+| POST   | `/repos/:owner/:name/agents/:id/message`  | owner     | Message an agent `{ message }`                                                                                 |
+| POST   | `/repos/:owner/:name/intents/:id/approve` | owner     | Approve and merge (also `changes`, `reject`, `revert`)                                                         |
+| GET    | `/repos/:owner/:name/blame?path=`         | readers   | Line-by-line authorship                                                                                        |
+| GET    | `/repos/:owner/:name/search?q=`           | readers   | Regex code search on the default branch                                                                        |
+| GET    | `/repos/:owner/:name/refs`                | readers   | Branches and tags                                                                                              |
+| POST   | `/repos/:owner/:name/leases`              | owner     | Lease a file by hand `{ path }` (DELETE releases)                                                              |
+| POST   | `/repos/:owner/:name/github/pr`           | owner     | Open a pull request on the GitHub source                                                                       |
+| POST   | `/repos/:owner/:name/github/sync`         | owner     | Sync new upstream commits into Hive                                                                            |
 
 Readers are the owner, plus everyone for public repositories. `fork=a1` targets an agent's fork.
 
@@ -221,6 +235,7 @@ packages/core/     Shared types, lease logic, 3-way file merge (+ tests)
 - Imports are public repositories only. Very large repositories are not a good fit yet: the coordinator keeps an
   in-memory checkout of the default branch.
 - Agents cannot run code themselves; the check command is their feedback loop.
+- A goal branch that conflicts with the default branch is reported, not resolved; goal intents cannot be reverted one by one.
 - GitHub sync skips binary files and stops when a file conflicts; it does not resolve conflicts for you.
 
 ## License

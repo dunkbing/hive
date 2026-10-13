@@ -34,7 +34,7 @@ Working and deployed at https://hive.dangbinh4869.workers.dev:
 
 Each phase is shippable on its own. Do them in order unless there is a reason not to.
 
-### Phase 1: Work that lives in the repo (biggest impact)
+### Phase 1: Work that lives in the repo (done)
 
 - **Tasks (issues for agents and people).** A Tasks tab: create tasks with a title and body, labels, status (open, in
   progress, in review, done, closed). Assign a task to an agent (launches it with the task as context) or to yourself.
@@ -101,15 +101,21 @@ the transcript shows it.
 - Integration tests for the Worker (Vitest with the Workers pool) covering auth, permissions, merge queue, review and
   revert.
 
-## Open items from the last session
+## Open items
 
-- **Containers permission.** The deploy uploads the Worker but cannot create the container application: the
-  Cloudflare API token needs **Containers: Edit** (and the account needs Workers Paid). Until then, checks are recorded
-  as skipped in production. After fixing, redeploy and run a real check on a demo repo.
+- **Containers permission (still open).** The token in `.env` gets "Authentication error" from the Containers API
+  (`GET /accounts/<id>/containers/applications`), so `wrangler deploy` cannot create the container application. The
+  token needs **Containers: Edit** (and the account Workers Paid). Until then checks are recorded as skipped in
+  production, and Phase 1 is committed but not deployed. After fixing: `vp run deploy`, then run a real check on a demo
+  repo. Locally, checks need Docker (`HIVE_DEV_CONTAINERS=1`).
+- **Phase 1 follow-ups.** A goal branch that conflicts with the default branch needs an agent to resolve it; goal
+  commits are squashed so blame shows the goal, not each intent; no comments or assignees other than the owner.
 - **Opening a GitHub PR** has only been tested against a mocked GitHub API. Test on a scratch repository.
 
 ## Working notes for the session
 
+- Installing needs `minimumReleaseAgeExclude` (wrangler, miniflare, isomorphic-git, postcss, @testing-library/user-event)
+  and `allowBuilds` (esbuild, workerd) in `pnpm-workspace.yaml` until those releases age past the policy.
 - Toolchain is Vite+: `vp install`, `vp check --fix`, `vp run -r test`, `vp run dev`, `vp run deploy` (from
   `apps/hive`). Add dependencies with `vp add` / `vp add -D`; do not edit dependency lists in `package.json` by hand.
 - Secrets live in `apps/hive/.dev.vars` locally (see `.dev.vars.example`) and as Worker secrets in production

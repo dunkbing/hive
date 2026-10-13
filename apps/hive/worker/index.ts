@@ -55,7 +55,23 @@ api.get("/me", async (c) => {
     agentsToday: await directory(c.env).agentsUsedToday(user.id),
     dailyAgentLimit: exempt ? null : Number(c.env.HIVE_DAILY_AGENT_LIMIT),
     githubConnected: !!github,
+    unread: await directory(c.env).unreadCount(user.id),
   });
+});
+
+api.get("/inbox", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.json({ error: "sign in required" }, 401);
+  const dir = directory(c.env);
+  return c.json({ items: await dir.listNotifications(user.id), unread: await dir.unreadCount(user.id) });
+});
+
+api.post("/inbox/read", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.json({ error: "sign in required" }, 401);
+  const { ids } = await c.req.json<{ ids?: number[] }>().catch(() => ({}) as { ids?: number[] });
+  await directory(c.env).markRead(user.id, Array.isArray(ids) ? ids.filter(Number.isInteger) : undefined);
+  return c.json({ ok: true });
 });
 
 /** Forgets the stored GitHub token (sign-in keeps working). */
@@ -278,6 +294,103 @@ repo.post("/agents/:agentId/message", async (c) => {
   await coordinator(c.env, c.get("repo").id).messageAgent(c.req.param("agentId"), text, user.login);
   return c.json({ ok: true });
 });
+
+// ---- tasks and goals -------------------------------------------------------------
+
+const cleanLabels = (labels: unknown) =>
+  Array.isArray(labels)
+    ? [...new Set(labels.map((l) => String(l).trim().toLowerCase().slice(0, 30)).filter(Boolean))].slice(0, 10)
+    : undefined;
+
+repo.post("/tasks", async (c) => {
+  const body = await c.req.json<{ title?: string; body?: string; labels?: string[]; goalNumber?: number }>();
+  const title = (body.title ?? "").trim().slice(0, 200);
+  if (!title) return c.json({ error: "Give the task a title." }, 400);
+  return c.json(
+    await coordinator(c.env, c.get("repo").id).createTask({
+      title,
+      body: (body.body ?? "").trim().slice(0, MAX_TASK_LENGTH),
+      labels: cleanLabels(body.labels) ?? [],
+      goalNumber: body.goalNumber,
+      by: c.get("user")!.login,
+    }),
+    201,
+  );
+});
+
+repo.patch("/tasks/:number", async (c) => {
+  const body = await c.req.json<{ title?: string; body?: string; labels?: string[]; status?: string }>();
+  if (body.title !== undefined && !body.title.trim()) return c.json({ error: "Give the task a title." }, 400);
+  return c.json(
+    await coordinator(c.env, c.get("repo").id).updateTask(Number(c.req.param("number")), {
+      title: body.title?.trim().slice(0, 200),
+      body: body.body?.trim().slice(0, MAX_TASK_LENGTH),
+      labels: cleanLabels(body.labels),
+      status: body.status === "open" || body.status === "closed" ? body.status : undefined,
+    }),
+  );
+});
+
+repo.post("/tasks/:number/assign", async (c) => {
+  const user = c.get("user")!;
+  const { to } = await c.req.json<{ to?: string }>();
+  if (to !== "agent" && to !== "me" && to !== "none") return c.json({ error: "to must be agent, me or none" }, 400);
+  if (to === "agent") {
+    const limited = await reserveRuns(c.env, user, 1);
+    if (limited) return c.json({ error: limited }, 429);
+  }
+  return c.json(await coordinator(c.env, c.get("repo").id).assignTask(Number(c.req.param("number")), to, user.login));
+});
+
+repo.post("/goals", async (c) => {
+  const user = c.get("user")!;
+  const body = await c.req.json<{
+    goal?: string;
+    summary?: string;
+    mode?: string;
+    launch?: boolean;
+    tasks?: { name?: string; task?: string; files?: string[] }[];
+  }>();
+  const goal = (body.goal ?? "").trim().slice(0, MAX_TASK_LENGTH);
+  const tasks = (body.tasks ?? [])
+    .map((t) => ({
+      name: AGENT_NAME.test(t.name ?? "") ? t.name : undefined,
+      task: (t.task ?? "").trim().slice(0, MAX_TASK_LENGTH),
+      files: Array.isArray(t.files) ? t.files.map(String).slice(0, 20) : undefined,
+    }))
+    .filter((t) => t.task);
+  if (!goal) return c.json({ error: "Describe the goal." }, 400);
+  if (tasks.length > MAX_TASKS_PER_LAUNCH) return c.json({ error: `At most ${MAX_TASKS_PER_LAUNCH} tasks.` }, 400);
+  const launch = body.launch !== false;
+  if (launch) {
+    const limited = await reserveRuns(c.env, user, tasks.length);
+    if (limited) return c.json({ error: limited }, 429);
+  }
+  const title = goal.split("\n")[0].slice(0, 100);
+  return c.json(
+    await coordinator(c.env, c.get("repo").id).createGoal({
+      title,
+      summary: (body.summary ?? "").trim().slice(0, 1000) || (goal.length > title.length ? goal : ""),
+      mode: body.mode === "branch" ? "branch" : "direct",
+      by: user.login,
+      tasks,
+      launch,
+    }),
+    201,
+  );
+});
+
+repo.post("/goals/:number/merge", async (c) =>
+  c.json(await coordinator(c.env, c.get("repo").id).mergeGoal(Number(c.req.param("number")), c.get("user")!.login)),
+);
+
+repo.post("/goals/:number/close", async (c) =>
+  c.json(await coordinator(c.env, c.get("repo").id).closeGoal(Number(c.req.param("number")))),
+);
+
+repo.get("/goals/:number/diff", async (c) =>
+  c.json(await coordinator(c.env, c.get("repo").id).goalDiff(Number(c.req.param("number")))),
+);
 
 // ---- review queue -------------------------------------------------------------
 

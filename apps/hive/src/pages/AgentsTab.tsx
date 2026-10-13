@@ -1,6 +1,7 @@
 import {
   shortSha,
   type AgentInfo,
+  type GoalMode,
   type HiveEvent,
   type Intent,
   type Lease,
@@ -9,7 +10,7 @@ import {
   type RepoState,
 } from "@hive/core";
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
 import { api } from "../api.ts";
 import { ErrorBox, INTENT_LABEL, STATUS_LABEL, isRunning, timeAgo, useTick } from "../components.tsx";
 import { useSession } from "../session.tsx";
@@ -64,6 +65,8 @@ type Mode = "plan" | "tasks";
 function Launcher() {
   const { owner, name, state, setState } = useRepo();
   const { me, refresh } = useSession();
+  const navigate = useNavigate();
+  const [goalMode, setGoalMode] = useState<GoalMode>("direct");
   const [mode, setMode] = useState<Mode>("plan");
   const [goal, setGoal] = useState("");
   const [plan, setPlan] = useState<Plan | null>(null);
@@ -99,6 +102,18 @@ function Launcher() {
       setPlan(null);
       setGoal("");
       setTasks([""]);
+    });
+
+  const launchGoal = (p: Plan) =>
+    act("launch", async () => {
+      const g = await api.createGoal(owner, name, {
+        goal,
+        summary: p.summary,
+        mode: goalMode,
+        tasks: p.tasks.map((t) => ({ name: t.name, task: t.task, files: t.files })),
+        launch: true,
+      });
+      void navigate(`/${owner}/${name}/goals/${g.number}`);
     });
 
   const updateSetting = (body: { leasesEnabled?: boolean; mergeMode?: MergeMode }) =>
@@ -245,10 +260,16 @@ function Launcher() {
                 </button>
                 <span className="grow" />
                 <span className="muted small">{running} running</span>
+                <label className="toggle-select">
+                  <select value={goalMode} onChange={(e) => setGoalMode(e.target.value as GoalMode)}>
+                    <option value="direct">Land each intent as it merges</option>
+                    <option value="branch">Review as one unit on a goal branch</option>
+                  </select>
+                </label>
                 <button
                   className="btn btn-primary"
                   disabled={busy !== null || plan.tasks.length === 0 || running + plan.tasks.length > MAX_ACTIVE}
-                  onClick={() => void launch({ tasks: plan.tasks.map((t) => ({ name: t.name, task: t.task })) })}
+                  onClick={() => void launchGoal(plan)}
                 >
                   {busy === "launch"
                     ? "Forking…"

@@ -355,9 +355,14 @@ class AgentRun {
     this.client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
   }
 
+  /** The branch the agent reads and merges into (a goal branch, or the default branch). */
+  private get target() {
+    return this.config.target ?? this.config.branch;
+  }
+
   async run(): Promise<{ status: AgentStatus; detail: string }> {
     const { agentId } = this.config;
-    this.ctx = await this.coordinator.agentContext();
+    this.ctx = await this.coordinator.agentContext(agentId);
     const prompt = await this.openingPrompt();
     this.host.step("run", this.reason.kind === "initial" ? "Started" : `Revision: ${this.reason.kind}`, prompt);
     const messages: BetaMessageParam[] = [{ role: "user", content: prompt }];
@@ -528,7 +533,7 @@ class AgentRun {
 
   /** A shallow checkout of the default branch for listing and searching. */
   private async tree(): Promise<Workdir> {
-    this.snapshot ??= await cloneRepo(this.config.main, this.config.branch);
+    this.snapshot ??= await cloneRepo(this.config.main, this.target);
     return this.snapshot;
   }
 
@@ -558,7 +563,7 @@ class AgentRun {
 
   private async readMain(path: string): Promise<string | null> {
     using repo = await this.env.ARTIFACTS.get(this.config.repo);
-    const blob = await repo.readFile({ ref: this.config.branch, path });
+    const blob = await repo.readFile({ ref: this.target, path });
     return blob ? blob.text() : null;
   }
 
@@ -665,7 +670,7 @@ class AgentRun {
 
     await this.status("submitting", `committing to ${this.config.forkName}`);
     const wd = await cloneRepo(fork, branch);
-    await resetTo(wd, await fetchFrom(wd, "upstream", main, branch));
+    await resetTo(wd, await fetchFrom(wd, "upstream", main, this.target));
     const commit = await writeAndCommit(wd, Object.fromEntries(this.edits), summary, {
       name,
       email: `${agentId}@agents.hive.dev`,
