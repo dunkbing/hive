@@ -188,7 +188,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       const [head] = await repo.log({ ref: s.branch, limit: 1 });
       await this.ready(head.hash, head.message.split("\n")[0]);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = errorMessage(err);
       const pending = /IN_PROGRESS|not ready|NOT_FOUND/i.test(message);
       if (pending && Date.now() - (s.importStartedAt ?? 0) < IMPORT_TIMEOUT_MS) {
         await this.ctx.storage.setAlarm(Date.now() + IMPORT_POLL_MS);
@@ -198,6 +198,18 @@ export class RepoCoordinator extends DurableObject<Env> {
       s.statusError = message;
       await this.emit({ type: "repo.failed", error: message });
     }
+  }
+
+  /** Re-runs the post-import step (clone, branch detection, indexing) for an import that failed. */
+  async retryImport(): Promise<RepoState> {
+    const s = this.require();
+    if (s.status !== "failed" || s.template !== "import") throw new Error("only failed imports can be retried");
+    s.status = "importing";
+    s.statusError = null;
+    s.importStartedAt = Date.now();
+    await this.persist();
+    await this.ctx.storage.setAlarm(Date.now());
+    return this.state();
   }
 
   async getState(): Promise<RepoState> {
@@ -579,4 +591,11 @@ export class RepoCoordinator extends DurableObject<Env> {
       events: s.events.slice(-150),
     };
   }
+}
+
+/** isomorphic-git reports some failures as one error wrapping several; surface the first real cause. */
+function errorMessage(err: unknown): string {
+  const inner = (err as { errors?: unknown[] } | null)?.errors?.[0];
+  if (inner) return errorMessage(inner);
+  return err instanceof Error ? err.message : String(err);
 }

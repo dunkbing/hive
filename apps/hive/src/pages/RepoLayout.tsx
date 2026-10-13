@@ -1,6 +1,6 @@
 import type { HiveEvent, RepoRecord, RepoState } from "@hive/core";
 import { useState } from "react";
-import { Link, NavLink, Outlet, useOutletContext, useParams } from "react-router";
+import { Link, NavLink, Outlet, useLocation, useOutletContext, useParams } from "react-router";
 import { api, useLiveState, useLoad, type ApiError, type Connection } from "../api.ts";
 import { ErrorBox, Modal, Spinner, VisibilityBadge } from "../components.tsx";
 import { NotFound } from "./Shell.tsx";
@@ -41,6 +41,7 @@ function LoadedRepo(props: { owner: string; name: string; repo: RepoRecord; canW
   const running = state.agents.filter((a) => a.status !== "done" && a.status !== "failed").length;
 
   const ctx: RepoContext = { owner, name, repo, setRepo, canWrite, ...live };
+  const onSettings = useLocation().pathname.endsWith("/settings");
 
   return (
     <div className="repo">
@@ -76,10 +77,10 @@ function LoadedRepo(props: { owner: string; name: string; repo: RepoRecord; canW
         {canWrite && <NavLink to={`/${owner}/${name}/settings`}>Settings</NavLink>}
       </nav>
 
-      {state.status === "ready" ? (
+      {state.status === "ready" || (canWrite && onSettings) ? (
         <Outlet context={ctx} />
       ) : state.status === "failed" ? (
-        <ErrorBox error={`This repository could not be created: ${state.statusError ?? "unknown error"}`} />
+        <FailedRepo ctx={ctx} />
       ) : (
         <div className="center-page">
           <Spinner
@@ -89,6 +90,41 @@ function LoadedRepo(props: { owner: string; name: string; repo: RepoRecord; canW
       )}
 
       {cloneOpen && <CloneDialog owner={owner} name={name} onClose={() => setCloneOpen(false)} />}
+    </div>
+  );
+}
+
+function FailedRepo({ ctx }: { ctx: RepoContext }) {
+  const { owner, name, state, setState, canWrite } = ctx;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const retry = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setState(await api.retryImport(owner, name));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="failed-repo">
+      <ErrorBox error={`This repository could not be created: ${state.statusError ?? "unknown error"}`} />
+      {canWrite && (
+        <div className="row">
+          {state.template === "import" && (
+            <button className="btn btn-primary" disabled={busy} onClick={() => void retry()}>
+              {busy ? "Retrying…" : "Retry import"}
+            </button>
+          )}
+          <Link className="btn" to={`/${owner}/${name}/settings`}>
+            Settings
+          </Link>
+        </div>
+      )}
+      {error && <ErrorBox error={error} />}
     </div>
   );
 }

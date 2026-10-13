@@ -2,58 +2,35 @@
 
 type Entry =
   | { kind: "dir"; children: Set<string>; mtimeMs: number }
-  | { kind: "file"; data: Uint8Array; mtimeMs: number };
+  | { kind: "file"; data: Uint8Array; executable: boolean; mtimeMs: number }
+  | { kind: "link"; target: string; mtimeMs: number };
 
-class MemoryStats {
-  private entry: Entry;
+const MODES = { dir: 0o040000, file: 0o100644, executable: 0o100755, link: 0o120000 };
 
-  constructor(entry: Entry) {
-    this.entry = entry;
-  }
-
-  get size() {
-    return this.entry.kind === "file" ? this.entry.data.byteLength : 0;
-  }
-
-  get mtimeMs() {
-    return this.entry.mtimeMs;
-  }
-
-  get ctimeMs() {
-    return this.entry.mtimeMs;
-  }
-
-  get mode() {
-    return this.entry.kind === "file" ? 0o100644 : 0o040000;
-  }
-
-  get uid() {
-    return 0;
-  }
-
-  get gid() {
-    return 0;
-  }
-
-  get ino() {
-    return 0;
-  }
-
-  get dev() {
-    return 0;
-  }
-
-  isFile() {
-    return this.entry.kind === "file";
-  }
-
-  isDirectory() {
-    return this.entry.kind === "dir";
-  }
-
-  isSymbolicLink() {
-    return false;
-  }
+/** A plain, writable stats object: isomorphic-git overwrites `mode` on the stats it gets back. */
+function statsFor(entry: Entry) {
+  const mode =
+    entry.kind === "dir"
+      ? MODES.dir
+      : entry.kind === "link"
+        ? MODES.link
+        : entry.executable
+          ? MODES.executable
+          : MODES.file;
+  const size = entry.kind === "file" ? entry.data.byteLength : entry.kind === "link" ? entry.target.length : 0;
+  return {
+    mode,
+    size,
+    mtimeMs: entry.mtimeMs,
+    ctimeMs: entry.mtimeMs,
+    uid: 0,
+    gid: 0,
+    ino: 0,
+    dev: 0,
+    isFile: () => entry.kind === "file",
+    isDirectory: () => entry.kind === "dir",
+    isSymbolicLink: () => entry.kind === "link",
+  };
 }
 
 function fsError(code: string, path: string) {
@@ -130,20 +107,27 @@ export class MemoryFS {
     this.requireDir(parent).children.add(this.basename(target));
   }
 
-  async writeFile(path: string, data: string | Uint8Array | ArrayBuffer) {
+  async writeFile(path: string, data: string | Uint8Array | ArrayBuffer, options?: { mode?: number } | string) {
     const target = this.normalize(path);
     await this.mkdir(this.parent(target), { recursive: true });
     const bytes =
       typeof data === "string" ? this.encoder.encode(data) : data instanceof Uint8Array ? data : new Uint8Array(data);
-    this.entries.set(target, { kind: "file", data: bytes, mtimeMs: Date.now() });
+    const mode = typeof options === "object" ? options.mode : undefined;
+    this.entries.set(target, {
+      kind: "file",
+      data: bytes,
+      executable: !!mode && (mode & 0o111) !== 0,
+      mtimeMs: Date.now(),
+    });
     this.requireDir(this.parent(target)).children.add(this.basename(target));
   }
 
   async readFile(path: string, options?: string | { encoding?: string }) {
     const entry = this.requireEntry(path);
-    if (entry.kind !== "file") throw fsError("EISDIR", path);
+    if (entry.kind === "dir") throw fsError("EISDIR", path);
+    const data = entry.kind === "file" ? entry.data : this.encoder.encode(entry.target);
     const encoding = typeof options === "string" ? options : options?.encoding;
-    return encoding ? this.decoder.decode(entry.data) : entry.data;
+    return encoding ? this.decoder.decode(data) : data;
   }
 
   async readdir(path: string) {
@@ -153,7 +137,7 @@ export class MemoryFS {
   async unlink(path: string) {
     const target = this.normalize(path);
     const entry = this.requireEntry(target);
-    if (entry.kind !== "file") throw fsError("EISDIR", path);
+    if (entry.kind === "dir") throw fsError("EISDIR", path);
     this.entries.delete(target);
     this.requireDir(this.parent(target)).children.delete(this.basename(target));
   }
@@ -167,7 +151,7 @@ export class MemoryFS {
   }
 
   async stat(path: string) {
-    return new MemoryStats(this.requireEntry(path));
+    return statsFor(this.requireEntry(path));
   }
 
   async lstat(path: string) {
@@ -175,10 +159,16 @@ export class MemoryFS {
   }
 
   async readlink(path: string): Promise<string> {
-    throw fsError("EINVAL", path);
+    const entry = this.requireEntry(path);
+    if (entry.kind !== "link") throw fsError("EINVAL", path);
+    return entry.target;
   }
 
-  async symlink(_target: string, path: string): Promise<void> {
-    throw fsError("EPERM", path);
+  async symlink(target: string, path: string): Promise<void> {
+    const link = this.normalize(path);
+    await this.mkdir(this.parent(link), { recursive: true });
+    if (this.entries.has(link)) throw fsError("EEXIST", path);
+    this.entries.set(link, { kind: "link", target, mtimeMs: Date.now() });
+    this.requireDir(this.parent(link)).children.add(this.basename(link));
   }
 }

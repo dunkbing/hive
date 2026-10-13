@@ -203,6 +203,8 @@ repo.post("/agents", async (c) => {
   return c.json(await coordinator(c.env, c.get("repo").id).launchAgents(tasks));
 });
 
+repo.post("/retry", async (c) => c.json(await coordinator(c.env, c.get("repo").id).retryImport()));
+
 repo.post("/settings", async (c) => {
   const record = c.get("repo");
   const body = await c.req.json<{ leasesEnabled?: boolean; description?: string; visibility?: Visibility }>();

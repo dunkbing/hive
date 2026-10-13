@@ -73,6 +73,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  retryImport: (owner: string, name: string) => call<RepoState>(`${repoPath(owner, name)}/retry`, { method: "POST" }),
   deleteRepo: (owner: string, name: string) => call<{ ok: true }>(repoPath(owner, name), { method: "DELETE" }),
 };
 
