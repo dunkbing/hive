@@ -1,6 +1,7 @@
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { User } from "@hive/core";
+import { decrypt, encrypt } from "./secrets.ts";
 
 export const SESSION_COOKIE = "hive_session";
 const STATE_COOKIE = "hive_oauth_state";
@@ -45,6 +46,8 @@ auth.get("/github", (c) => {
   if (!c.env.GITHUB_CLIENT_ID) return c.text("GitHub sign-in is not configured", 503);
   const state = crypto.randomUUID();
   const next = safeNext(c.req.query("next"));
+  // `?scope=repo` asks for push access, used to open pull requests on GitHub.
+  const scope = c.req.query("scope") === "repo" ? "read:user repo" : "read:user";
   setCookie(c, STATE_COOKIE, `${state}|${next}`, {
     httpOnly: true,
     secure: isSecure(c),
@@ -55,7 +58,7 @@ auth.get("/github", (c) => {
   const url = new URL("https://github.com/login/oauth/authorize");
   url.searchParams.set("client_id", c.env.GITHUB_CLIENT_ID);
   url.searchParams.set("redirect_uri", new URL("/auth/github/callback", c.req.url).toString());
-  url.searchParams.set("scope", "read:user");
+  url.searchParams.set("scope", scope);
   url.searchParams.set("state", state);
   return c.redirect(url.toString());
 });
@@ -77,7 +80,7 @@ auth.get("/github/callback", async (c) => {
       redirect_uri: new URL("/auth/github/callback", c.req.url).toString(),
     }),
   });
-  const token = (await tokenRes.json()) as { access_token?: string; error_description?: string };
+  const token = (await tokenRes.json()) as { access_token?: string; scope?: string; error_description?: string };
   if (!token.access_token) return c.text(`Sign-in failed: ${token.error_description ?? "no token"}`, 400);
 
   const userRes = await fetch("https://api.github.com/user", {
@@ -90,11 +93,13 @@ auth.get("/github/callback", async (c) => {
   if (!userRes.ok) return c.text("Sign-in failed: could not read your GitHub profile.", 502);
   const gh = (await userRes.json()) as { id: number; login: string; name: string | null; avatar_url: string };
 
-  return startSession(
-    c,
-    { id: `gh:${gh.id}`, login: gh.login, name: gh.name, avatarUrl: gh.avatar_url },
-    safeNext(next),
-  );
+  const user = { id: `gh:${gh.id}`, login: gh.login, name: gh.name, avatarUrl: gh.avatar_url };
+  // Keep the token only when it can do more than identify the user.
+  const scopes = (token.scope ?? "").split(/[,\s]+/);
+  if (scopes.includes("repo") || scopes.includes("public_repo")) {
+    await directory(c.env).setGithubToken(user.id, await encrypt(c.env, token.access_token), token.scope ?? "");
+  }
+  return startSession(c, user, safeNext(next));
 });
 
 /** Local development only: sign in as any login without GitHub. Enabled by HIVE_DEV_LOGIN=1 in .dev.vars. */
@@ -114,3 +119,14 @@ auth.post("/logout", async (c) => {
   deleteCookie(c, SESSION_COOKIE, { path: "/" });
   return c.json({ ok: true });
 });
+
+/** The user's GitHub token with repo access, if they connected one. */
+export async function githubToken(env: Env, userId: string): Promise<string | null> {
+  const stored = await directory(env).getGithubToken(userId);
+  if (!stored) return null;
+  try {
+    return await decrypt(env, stored.sealed);
+  } catch {
+    return null;
+  }
+}

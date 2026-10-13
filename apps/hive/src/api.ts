@@ -7,6 +7,7 @@ import type {
   Me,
   MergeMode,
   Plan,
+  PullRequestInfo,
   RepoRecord,
   RepoState,
   TranscriptStep,
@@ -129,6 +130,15 @@ export const api = {
     call<{ matches: { path: string; line: number; text: string }[]; truncated: boolean }>(
       `${repoPath(owner, name)}/search${query({ q })}`,
     ),
+  openPullRequest: (owner: string, name: string, body: { title: string; body: string }) =>
+    call<PullRequestInfo>(`${repoPath(owner, name)}/github/pr`, { method: "POST", body: JSON.stringify(body) }),
+  syncGithub: (owner: string, name: string) =>
+    call<
+      | { status: "up-to-date" }
+      | { status: "synced"; commit: CommitInfo | null; files: number; skipped?: string[] }
+      | { status: "conflict"; files: string[] }
+    >(`${repoPath(owner, name)}/github/sync`, { method: "POST" }),
+  disconnectGithub: () => call<{ ok: true }>("/me/github", { method: "DELETE" }),
   deleteRepo: (owner: string, name: string) => call<{ ok: true }>(repoPath(owner, name), { method: "DELETE" }),
 };
 

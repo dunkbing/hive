@@ -1,7 +1,8 @@
 import { Hono } from "hono";
-import { auth, directory, loadUser, type AppEnv } from "./auth.ts";
+import { auth, directory, githubToken, loadUser, type AppEnv } from "./auth.ts";
 import { blame, commitDetail, listTree, log } from "./browse.ts";
 import { listRefs } from "./git.ts";
+import { GithubError, openPullRequest, parseGithubUrl, upstreamChanges } from "./github.ts";
 import { planGoal } from "./planner.ts";
 import type { RepoSource } from "./coordinator.ts";
 import type { MergeMode, RepoRecord, User, Visibility } from "@hive/core";
@@ -47,11 +48,21 @@ api.get("/me", async (c) => {
   const user = c.get("user");
   if (!user) return c.json({ user: null });
   const exempt = isAdmin(c.env, user.login);
+  const github = await directory(c.env).getGithubToken(user.id);
   return c.json({
     user,
     agentsToday: await directory(c.env).agentsUsedToday(user.id),
     dailyAgentLimit: exempt ? null : Number(c.env.HIVE_DAILY_AGENT_LIMIT),
+    githubConnected: !!github,
   });
+});
+
+/** Forgets the stored GitHub token (sign-in keeps working). */
+api.delete("/me/github", async (c) => {
+  const user = c.get("user");
+  if (!user) return c.json({ error: "sign in required" }, 401);
+  await directory(c.env).deleteGithubToken(user.id);
+  return c.json({ ok: true });
 });
 
 api.get("/repos", async (c) => {
@@ -297,6 +308,88 @@ repo.post("/intents/:intentId/reject", async (c) => {
 repo.post("/intents/:intentId/revert", async (c) =>
   c.json(await coordinator(c.env, c.get("repo").id).revertIntent(c.req.param("intentId"), c.get("user")!.login)),
 );
+
+// ---- GitHub round trip ------------------------------------------------------------
+
+repo.post("/github/pr", async (c) => {
+  const user = c.get("user")!;
+  const record = c.get("repo");
+  const coord = coordinator(c.env, record.id);
+  const source = await coord.githubSource();
+  const github = parseGithubUrl(source.url ?? undefined);
+  if (!github || !source.base || !source.head)
+    return c.json({ error: "This repository was not imported from GitHub." }, 400);
+  const token = await githubToken(c.env, user.id);
+  if (!token)
+    return c.json({ error: "Connect GitHub with repository access first.", code: "github_not_connected" }, 412);
+
+  const state = await coord.getState();
+  const body = await c.req
+    .json<{ title?: string; body?: string }>()
+    .catch(() => ({}) as { title?: string; body?: string });
+  const landed = state.intents.filter((i) => i.status === "merged");
+  const origin = new URL(c.req.url).origin;
+  const lines = landed.map((i) => {
+    const agent = state.agents.find((a) => a.id === i.agentId);
+    return `- ${i.summary} (${agent?.name ?? i.agentId}, [${i.mergedAs?.slice(0, 7)}](${origin}/${record.owner}/${record.name}/commit/${i.mergedAs}))`;
+  });
+  const title =
+    (body.title ?? "").trim() ||
+    (landed.length === 1 ? landed[0].summary : `Changes from Hive (${landed.length} intents)`);
+  const description = [
+    (body.body ?? "").trim(),
+    lines.length ? `### Intents merged in Hive\n\n${lines.join("\n")}` : "",
+    `Opened from [Hive](${origin}/${record.owner}/${record.name}), where AI agents worked on this concurrently.`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  try {
+    using art = await c.env.ARTIFACTS.get(record.id);
+    const pr = await openPullRequest({
+      token,
+      github,
+      art,
+      base: source.base,
+      head: source.head,
+      branch: `hive/${record.name.toLowerCase().replace(/[^a-z0-9-]+/g, "-")}-${Date.now().toString(36)}`,
+      title: title.slice(0, 200),
+      body: description,
+    });
+    await coord.recordPullRequest(pr, user.login);
+    return c.json(pr);
+  } catch (err) {
+    if (err instanceof GithubError && err.status === 401) {
+      return c.json({ error: "Your GitHub token expired. Connect GitHub again.", code: "github_not_connected" }, 412);
+    }
+    return c.json({ error: (err as Error).message }, err instanceof GithubError ? 502 : 400);
+  }
+});
+
+repo.post("/github/sync", async (c) => {
+  const user = c.get("user")!;
+  const coord = coordinator(c.env, c.get("repo").id);
+  const source = await coord.githubSource();
+  const github = parseGithubUrl(source.url ?? undefined);
+  if (!github || !source.base) return c.json({ error: "This repository was not imported from GitHub." }, 400);
+  try {
+    const token = await githubToken(c.env, user.id);
+    const upstream = await upstreamChanges(token, github, source.base).catch((err: unknown) => {
+      if (!token && err instanceof GithubError && err.status === 403) {
+        throw new GithubError(
+          403,
+          "GitHub's anonymous rate limit was reached. Connect GitHub to sync with your own quota.",
+        );
+      }
+      throw err;
+    });
+    if (upstream.head === source.base) return c.json({ status: "up-to-date" });
+    const result = await coord.syncUpstream(upstream.changes, upstream.head, user.login);
+    return c.json({ ...result, upstream: upstream.head, skipped: upstream.skipped });
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, err instanceof GithubError ? 502 : 400);
+  }
+});
 
 // ---- people as participants -------------------------------------------------------
 

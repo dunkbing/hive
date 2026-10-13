@@ -7,12 +7,14 @@ import {
   type AgentInfo,
   type AgentStatus,
   type CommitInfo,
+  type GithubLink,
   type HiveEvent,
   type HiveEventBody,
   type Intent,
   type Lease,
   type LeaseScope,
   type MergeMode,
+  type PullRequestInfo,
   type RepoState,
   type RepoStats,
   type RepoStatus,
@@ -65,6 +67,9 @@ interface Persisted {
   head: string | null;
   importUrl?: string;
   importStartedAt?: number;
+  /** Upstream commit last imported or synced, for imports from GitHub. */
+  importBase?: string;
+  pullRequests?: PullRequestInfo[];
   leasesEnabled: boolean;
   mergeMode: MergeMode;
   agents: Record<string, AgentInfo>;
@@ -134,7 +139,11 @@ export class RepoCoordinator extends DurableObject<Env> {
     void ctx.blockConcurrencyWhile(async () => {
       const s = (await ctx.storage.get<Persisted>("s")) ?? null;
       // State written by earlier versions lacks newer fields.
-      if (s) s.mergeMode ??= "auto";
+      if (s) {
+        s.mergeMode ??= "auto";
+        // Imports made before importBase existed: the import head is the oldest commit Hive recorded.
+        if (s.template === "import" && s.status === "ready" && !s.importBase) s.importBase = s.commits.at(-1)?.sha;
+      }
       this.s = s;
     });
   }
@@ -213,6 +222,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       s.files = await listFiles(wd);
       using repo = await this.env.ARTIFACTS.get(s.id);
       const [head] = await repo.log({ ref: s.branch, limit: 1 });
+      s.importBase = head.hash;
       await this.ready(head.hash, head.message.split("\n")[0]);
     } catch (err) {
       const message = errorMessage(err);
@@ -786,6 +796,61 @@ export class RepoCoordinator extends DurableObject<Env> {
     return { url: s.remote, token: this.mainToken.token };
   }
 
+  // ---- GitHub round trip ------------------------------------------------------
+
+  async githubSource(): Promise<{ url: string | null; base: string | null; head: string | null; branch: string }> {
+    const s = this.require();
+    return { url: s.importUrl ?? null, base: s.importBase ?? null, head: s.head, branch: s.branch };
+  }
+
+  async recordPullRequest(pr: PullRequestInfo, by: string): Promise<void> {
+    const s = this.require();
+    s.pullRequests = [pr, ...(s.pullRequests ?? [])].slice(0, 20);
+    await this.emit({ type: "github.pr", pr, by });
+  }
+
+  /**
+   * Brings upstream changes into the default branch: a 3-way merge per file between the last synced upstream
+   * commit, Hive's head and the new upstream. Nothing changes when any file conflicts.
+   */
+  async syncUpstream(
+    changes: { path: string; base: string | null; theirs: string | null }[],
+    upstream: string,
+    by: string,
+  ): Promise<{ status: "synced"; commit: CommitInfo | null; files: number } | { status: "conflict"; files: string[] }> {
+    const run = this.mergeChain.then(async () => {
+      const s = this.require();
+      const wd = await this.main();
+      await this.syncMain(wd);
+      const files: Record<string, string | null> = {};
+      const conflicts: string[] = [];
+      for (const change of changes) {
+        const ours = await readText(wd, change.path);
+        const result = mergeFile(change.base, ours, change.theirs);
+        if (!result.clean) conflicts.push(change.path);
+        else if (result.text !== ours) files[change.path] = result.text;
+      }
+      if (conflicts.length) return { status: "conflict" as const, files: conflicts };
+
+      let commit: CommitInfo | null = null;
+      if (Object.keys(files).length) {
+        const repo = s.importUrl?.replace(/^https:\/\/github\.com\//, "") ?? "upstream";
+        const message = `Sync from GitHub ${repo}@${upstream.slice(0, 7)}`;
+        const sha = await this.commitToMain(files, `${message}\n\nHive-Upstream: ${upstream}`, {
+          name: by,
+          email: `${by}@users.hive.dev`,
+        });
+        commit = { sha, message, author: by, at: Date.now() };
+        await this.recordCommit(commit);
+      }
+      s.importBase = upstream;
+      await this.emit({ type: "github.synced", upstream, commit, by });
+      return { status: "synced" as const, commit, files: Object.keys(files).length };
+    });
+    this.mergeChain = run.catch(() => undefined);
+    return run;
+  }
+
   // ---- events & websockets -----------------------------------------------
 
   override async fetch(request: Request): Promise<Response> {
@@ -836,6 +901,7 @@ export class RepoCoordinator extends DurableObject<Env> {
       head: s.head,
       leasesEnabled: s.leasesEnabled,
       mergeMode: s.mergeMode,
+      github: githubLink(s),
       agents: Object.values(s.agents),
       leases: Object.values(s.leases),
       intents: Object.values(s.intents)
@@ -846,6 +912,12 @@ export class RepoCoordinator extends DurableObject<Env> {
       events: s.events.slice(-150),
     };
   }
+}
+
+function githubLink(s: Persisted): GithubLink | null {
+  const m = s.importUrl?.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
+  if (!m) return null;
+  return { repo: `${m[1]}/${m[2]}`, base: s.importBase ?? null, pullRequests: s.pullRequests ?? [] };
 }
 
 /** isomorphic-git reports some failures as one error wrapping several; surface the first real cause. */

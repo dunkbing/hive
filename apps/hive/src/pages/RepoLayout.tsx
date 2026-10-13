@@ -83,6 +83,7 @@ function LoadedRepo(props: { owner: string; name: string; repo: RepoRecord; canW
             state.intents.length > 0 && <span className="count">{state.intents.length}</span>
           )}
         </NavLink>
+        {state.github && <NavLink to={`/${owner}/${name}/github`}>GitHub</NavLink>}
         {canWrite && <NavLink to={`/${owner}/${name}/settings`}>Settings</NavLink>}
       </nav>
 

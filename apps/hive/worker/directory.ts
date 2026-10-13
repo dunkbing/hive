@@ -28,6 +28,9 @@ export class Directory extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS usage (
         user_id TEXT NOT NULL, day TEXT NOT NULL, agents INTEGER NOT NULL, PRIMARY KEY (user_id, day)
       );
+      CREATE TABLE IF NOT EXISTS github_tokens (
+        user_id TEXT PRIMARY KEY, sealed TEXT NOT NULL, scope TEXT NOT NULL, updated_at INTEGER NOT NULL
+      );
     `);
   }
 
@@ -68,6 +71,31 @@ export class Directory extends DurableObject<Env> {
 
   deleteSession(sessionId: string): void {
     this.sql.exec("DELETE FROM sessions WHERE id = ?", sessionId);
+  }
+
+  // ---- GitHub tokens (sealed with secrets.ts before they get here) ------------------
+
+  setGithubToken(userId: string, sealed: string, scope: string): void {
+    this.sql.exec(
+      `INSERT INTO github_tokens (user_id, sealed, scope, updated_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET sealed = excluded.sealed, scope = excluded.scope, updated_at = excluded.updated_at`,
+      userId,
+      sealed,
+      scope,
+      Date.now(),
+    );
+  }
+
+  getGithubToken(userId: string): { sealed: string; scope: string } | null {
+    return (
+      this.sql
+        .exec<{ sealed: string; scope: string }>("SELECT sealed, scope FROM github_tokens WHERE user_id = ?", userId)
+        .toArray()[0] ?? null
+    );
+  }
+
+  deleteGithubToken(userId: string): void {
+    this.sql.exec("DELETE FROM github_tokens WHERE user_id = ?", userId);
   }
 
   // ---- repos ---------------------------------------------------------------

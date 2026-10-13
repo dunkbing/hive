@@ -8,6 +8,7 @@ import { AgentsTab } from "./pages/AgentsTab.tsx";
 import { CodeTab } from "./pages/CodeTab.tsx";
 import { CommitPage } from "./pages/CommitPage.tsx";
 import { CommitsTab } from "./pages/CommitsTab.tsx";
+import { GithubTab } from "./pages/GithubTab.tsx";
 import { Home } from "./pages/Home.tsx";
 import { IntentsTab } from "./pages/IntentsTab.tsx";
 import { NewRepo } from "./pages/NewRepo.tsx";
@@ -35,6 +36,7 @@ const router = createBrowserRouter([
           { path: "agents", element: <AgentsTab /> },
           { path: "agents/:agentId", element: <AgentPage /> },
           { path: "intents", element: <IntentsTab /> },
+          { path: "github", element: <GithubTab /> },
           { path: "settings", element: <SettingsTab /> },
         ],
       },

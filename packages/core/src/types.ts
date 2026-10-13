@@ -108,9 +108,13 @@ export type HiveEventBody =
   | { type: "intent.changes_requested"; intentId: string; agentId: string; comment: string; by: string }
   | { type: "intent.rejected"; intentId: string; agentId: string; reason: string }
   | { type: "intent.reverted"; intentId: string; agentId: string; commit: CommitInfo; by: string }
-  | { type: "commit.external"; head: string };
+  | { type: "commit.external"; head: string }
+  | { type: "github.synced"; upstream: string; commit: CommitInfo | null; by: string }
+  | { type: "github.pr"; pr: PullRequestInfo; by: string };
 
 export type HiveEvent = HiveEventBody & { seq: number; ts: number };
+
+import type { GithubLink, PullRequestInfo } from "./api.ts";
 
 export type RepoStatus = "creating" | "importing" | "ready" | "failed";
 
@@ -126,6 +130,8 @@ export interface RepoState {
   head: string | null;
   leasesEnabled: boolean;
   mergeMode: MergeMode;
+  /** Set for repositories imported from GitHub. */
+  github: GithubLink | null;
   agents: AgentInfo[];
   leases: Lease[];
   intents: Intent[];

@@ -12,6 +12,8 @@ export interface Me {
   agentsToday?: number;
   /** null when the user has no daily limit. */
   dailyAgentLimit?: number | null;
+  /** Whether the user granted repository access on GitHub (for pull requests). */
+  githubConnected?: boolean;
 }
 
 export type Visibility = "public" | "private";
@@ -84,4 +86,23 @@ export interface PlannedTask {
 export interface Plan {
   summary: string;
   tasks: PlannedTask[];
+}
+
+export interface PullRequestInfo {
+  number: number;
+  url: string;
+  branch: string;
+  title: string;
+  /** Hive commit the pull request was built from. */
+  head: string;
+  createdAt: number;
+}
+
+/** For repositories imported from GitHub. */
+export interface GithubLink {
+  /** owner/repo */
+  repo: string;
+  /** The upstream commit Hive last imported or synced with. */
+  base: string | null;
+  pullRequests: PullRequestInfo[];
 }

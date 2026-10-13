@@ -69,56 +69,69 @@ async function blobText(
   return { text: new TextDecoder().decode(bytes) };
 }
 
-/** A commit and the files it changed relative to its first parent. Unchanged subtrees are skipped by hash. */
-export async function commitDetail(repo: ArtifactsRepo, sha: string): Promise<CommitDetail | null> {
-  const commit = await repo.readCommit(sha);
-  if (!commit) return null;
-  const parent = commit.parents[0] ? await repo.readCommit(commit.parents[0]) : null;
+export interface TreeChange {
+  path: string;
+  /** Blob ids before and after; undefined when the file did not exist on that side. */
+  before?: string;
+  after?: string;
+  /** Git mode on the "after" side, e.g. 100644 or 100755. */
+  mode?: string;
+}
 
-  const changes: { path: string; before?: string; after?: string }[] = [];
-  const walk = async (prefix: string, beforeTree: string | undefined, afterTree: string | undefined) => {
-    if (beforeTree === afterTree || changes.length > MAX_DIFF_FILES) return;
+/** Files that differ between two trees. Unchanged subtrees are skipped by hash, so this is cheap for small diffs. */
+export async function diffTrees(
+  repo: ArtifactsRepo,
+  beforeTree: string | undefined,
+  afterTree: string | undefined,
+  limit = Infinity,
+): Promise<TreeChange[]> {
+  const changes: TreeChange[] = [];
+  const walk = async (prefix: string, bTreeHash: string | undefined, aTreeHash: string | undefined) => {
+    if (bTreeHash === aTreeHash || changes.length > limit) return;
     const [before, after] = await Promise.all([
-      beforeTree ? repo.readTree(beforeTree) : Promise.resolve([]),
-      afterTree ? repo.readTree(afterTree) : Promise.resolve([]),
+      bTreeHash ? repo.readTree(bTreeHash) : Promise.resolve([]),
+      aTreeHash ? repo.readTree(aTreeHash) : Promise.resolve([]),
     ]);
     const names = new Set([...(before ?? []), ...(after ?? [])].map((e) => e.name));
     const subtrees: Promise<void>[] = [];
     for (const name of [...names].sort()) {
       const b = before?.find((e) => e.name === name);
       const a = after?.find((e) => e.name === name);
-      if (b?.hash === a?.hash) continue;
+      if (b?.hash === a?.hash && b?.mode === a?.mode) continue;
       const path = prefix + name;
       const bTree = b?.type === "tree" ? b.hash : undefined;
       const aTree = a?.type === "tree" ? a.hash : undefined;
       if (bTree || aTree) subtrees.push(walk(`${path}/`, bTree, aTree));
-      const bBlob = b && b.type !== "tree" ? b.hash : undefined;
-      const aBlob = a && a.type !== "tree" ? a.hash : undefined;
-      if (bBlob || aBlob) changes.push({ path, before: bBlob, after: aBlob });
+      const bBlob = b && b.type !== "tree" && b.type !== "gitlink" ? b.hash : undefined;
+      const aBlob = a && a.type !== "tree" && a.type !== "gitlink" ? a.hash : undefined;
+      if (bBlob || aBlob) changes.push({ path, before: bBlob, after: aBlob, mode: aBlob ? a!.mode : undefined });
     }
     await Promise.all(subtrees);
   };
-  await walk("", parent?.treeHash, commit.treeHash);
+  await walk("", beforeTree, afterTree);
+  return changes.sort((x, y) => x.path.localeCompare(y.path));
+}
+
+/** A commit and the files it changed relative to its first parent. */
+export async function commitDetail(repo: ArtifactsRepo, sha: string): Promise<CommitDetail | null> {
+  const commit = await repo.readCommit(sha);
+  if (!commit) return null;
+  const parent = commit.parents[0] ? await repo.readCommit(commit.parents[0]) : null;
+  const changes = await diffTrees(repo, parent?.treeHash, commit.treeHash, MAX_DIFF_FILES);
 
   const truncated = changes.length > MAX_DIFF_FILES;
   const files = await Promise.all(
-    changes
-      .sort((x, y) => x.path.localeCompare(y.path))
-      .slice(0, MAX_DIFF_FILES)
-      .map(async ({ path, before, after }): Promise<FileChange> => {
-        const none: Awaited<ReturnType<typeof blobText>> = { text: null };
-        const [b, a] = await Promise.all([
-          before ? blobText(repo, before) : none,
-          after ? blobText(repo, after) : none,
-        ]);
-        return {
-          path,
-          status: !before ? "added" : !after ? "deleted" : "modified",
-          before: b.text,
-          after: a.text,
-          omitted: b.omitted ?? a.omitted,
-        };
-      }),
+    changes.slice(0, MAX_DIFF_FILES).map(async ({ path, before, after }): Promise<FileChange> => {
+      const none: Awaited<ReturnType<typeof blobText>> = { text: null };
+      const [b, a] = await Promise.all([before ? blobText(repo, before) : none, after ? blobText(repo, after) : none]);
+      return {
+        path,
+        status: !before ? "added" : !after ? "deleted" : "modified",
+        before: b.text,
+        after: a.text,
+        omitted: b.omitted ?? a.omitted,
+      };
+    }),
   );
   return { commit: summarize(commit), files, truncated };
 }
