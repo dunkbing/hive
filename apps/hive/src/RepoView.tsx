@@ -64,7 +64,7 @@ export function RepoView({ repo, onNewRepo }: { repo: string; onNewRepo: (name: 
           <span className="repo-name">{state.name}</span>
           <span className="branch">main</span>
           <code>{shortSha(state.head)}</code>
-          <span className={`conn conn-${connection}`} title={`websocket ${connection}`} />
+          <span className={`conn conn-${connection}`} title={connection === "live" ? "live (websocket)" : "polling"} />
         </div>
         <div className="actions">
           <label className={`toggle ${state.leasesEnabled ? "on" : ""}`}>

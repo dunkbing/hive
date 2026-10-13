@@ -222,7 +222,7 @@ a {
 }
 
 .conn-offline {
-  background: var(--bad);
+  background: var(--honey);
 }
 
 .actions {

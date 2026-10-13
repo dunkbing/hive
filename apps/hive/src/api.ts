@@ -25,7 +25,10 @@ export const api = {
 
 export type Connection = "connecting" | "live" | "offline";
 
-/** Live repo state: an initial fetch, then a full snapshot on every event over a WebSocket. */
+/**
+ * Live repo state: a full snapshot on every event over a WebSocket. While the socket is down (some proxies and
+ * conference networks block upgrades) it falls back to polling.
+ */
 export function useRepo(repo: string) {
   const [state, setState] = useState<RepoState | null>(null);
   const [lastEvent, setLastEvent] = useState<HiveEvent | null>(null);
@@ -36,25 +39,43 @@ export function useRepo(repo: string) {
     let socket: WebSocket | null = null;
     let closed = false;
     let retry = 0;
+    let live = false;
+    let lastSeq = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
-    api.state(repo).then(setState, (err: Error) => setError(err.message));
+    const apply = (next: RepoState, event?: HiveEvent) => {
+      setState(next);
+      const newest = event ?? next.events.at(-1);
+      if (newest && newest.seq > lastSeq) {
+        lastSeq = newest.seq;
+        setLastEvent(newest);
+      }
+    };
+    const poll = () =>
+      api.state(repo).then(
+        (next) => apply(next),
+        (err: Error) => setError(err.message),
+      );
+
+    void poll();
+    const poller = setInterval(() => !live && void poll(), 2_000);
 
     const connect = () => {
       const proto = location.protocol === "https:" ? "wss" : "ws";
       socket = new WebSocket(`${proto}://${location.host}/api/repos/${repo}/ws`);
       socket.onopen = () => {
         retry = 0;
+        live = true;
         setConnection("live");
       };
       socket.onmessage = (msg) => {
         if (typeof msg.data !== "string" || msg.data === "pong") return;
         const data = JSON.parse(msg.data) as { state: RepoState; event?: HiveEvent };
-        setState(data.state);
-        if (data.event) setLastEvent(data.event);
+        apply(data.state, data.event);
       };
       socket.onclose = () => {
         if (closed) return;
+        live = false;
         setConnection("offline");
         timer = setTimeout(connect, Math.min(10_000, 500 * 2 ** retry++));
       };
@@ -66,6 +87,7 @@ export function useRepo(repo: string) {
       closed = true;
       clearTimeout(timer);
       clearInterval(ping);
+      clearInterval(poller);
       socket?.close();
     };
   }, [repo]);

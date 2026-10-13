@@ -16,6 +16,8 @@ branches, pull requests and manual conflict resolution with three primitives bui
 
 Built for the Cloudflare "Build the next GitHub" challenge, on **Workers**, **Durable Objects** and **Artifacts**.
 
+**Live:** https://hive.dangbinh4869.workers.dev
+
 ![dashboard](docs/dashboard.png)
 
 ## The demo
