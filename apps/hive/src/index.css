@@ -1829,3 +1829,198 @@ a.agent-name {
 .stats {
   grid-template-columns: repeat(6, minmax(0, 1fr));
 }
+
+/* ---- code tab: search, go to file, blame, markdown -------------------------------------- */
+
+.search-box input {
+  width: 240px;
+  height: 32px;
+}
+
+.tree-filter {
+  width: calc(100% - 16px);
+  margin: 4px 8px 8px;
+  height: 30px;
+  font-size: 13px;
+}
+
+.tree-empty {
+  padding: 4px 12px;
+}
+
+.file-pane-head {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.file-pane-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.error-text {
+  color: var(--bad);
+}
+
+.search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.search-file {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.search-file > button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.search-file table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.search-line {
+  white-space: pre;
+  padding: 2px 12px 2px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 0;
+  width: 100%;
+}
+
+.blame {
+  overflow: auto;
+  max-height: calc(100vh - 240px);
+  background: #0d1117;
+}
+
+.blame-note {
+  padding: 8px 12px;
+  margin: 0;
+}
+
+.blame table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12.5px;
+  line-height: 20px;
+}
+
+.blame-commit {
+  width: 260px;
+  min-width: 260px;
+  max-width: 260px;
+  vertical-align: top;
+  padding: 0 10px;
+  border-left: 3px solid var(--border);
+  font-size: 12px;
+}
+
+.blame-commit a {
+  color: var(--text);
+  display: block;
+  padding-top: 2px;
+}
+
+.blame-start td {
+  border-top: 1px solid var(--border);
+}
+
+.blame-author {
+  font-weight: 600;
+}
+
+.blame-subject {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.blame-text {
+  white-space: pre;
+  padding-right: 16px;
+}
+
+.markdown {
+  padding: 20px 28px;
+  line-height: 1.6;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.markdown h1,
+.markdown h2 {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+  margin-top: 24px;
+}
+
+.markdown h1:first-child,
+.markdown h2:first-child {
+  margin-top: 0;
+}
+
+.markdown pre {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  overflow: auto;
+}
+
+.markdown pre code {
+  border: 0;
+  background: none;
+  padding: 0;
+}
+
+.markdown table {
+  border-collapse: collapse;
+}
+
+.markdown th,
+.markdown td {
+  border: 1px solid var(--border);
+  padding: 4px 10px;
+}
+
+.markdown img {
+  max-width: 100%;
+}
+
+.markdown blockquote {
+  margin: 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--border-strong);
+  color: var(--muted);
+}
+
+@media (max-width: 600px) {
+  .search-box input {
+    width: 100%;
+  }
+
+  .search-box {
+    flex: 1;
+  }
+
+  .blame-commit {
+    width: 140px;
+    min-width: 140px;
+    max-width: 140px;
+  }
+
+  .markdown {
+    padding: 16px;
+  }
+}

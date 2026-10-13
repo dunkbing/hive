@@ -75,7 +75,15 @@ export const api = {
     ),
   commit: (owner: string, name: string, sha: string, fork?: string) =>
     call<CommitDetail>(`${repoPath(owner, name)}/commit/${sha}${query({ fork })}`),
-  clone: (owner: string, name: string) => call<{ command: string; remote: string }>(`${repoPath(owner, name)}/clone`),
+  clone: (owner: string, name: string, write = false) =>
+    call<{ command: string; remote: string; write: boolean }>(
+      `${repoPath(owner, name)}/clone${query({ write: write ? "1" : undefined })}`,
+    ),
+  refs: (owner: string, name: string) => call<{ branches: string[]; tags: string[] }>(`${repoPath(owner, name)}/refs`),
+  blame: (owner: string, name: string, path: string, ref?: string, fork?: string) =>
+    call<{ commits: CommitSummary[]; lines: number[]; truncated: boolean }>(
+      `${repoPath(owner, name)}/blame${query({ path, ref, fork })}`,
+    ),
   launchAgents: (owner: string, name: string, body: { demo: true } | { tasks: { name?: string; task: string }[] }) =>
     call<RepoState>(`${repoPath(owner, name)}/agents`, { method: "POST", body: JSON.stringify(body) }),
   updateSettings: (

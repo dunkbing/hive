@@ -1,6 +1,7 @@
 // Read-only repository browsing straight from the Artifacts binding: refs, trees, blobs, history and diffs.
 
 import type { CommitDetail, CommitSummary, FileChange, Tree, TreeEntry } from "@hive/core";
+import { diffArrays } from "diff";
 
 const MAX_TREE_ENTRIES = 5000;
 const MAX_DIFF_FILES = 60;
@@ -120,4 +121,55 @@ export async function commitDetail(repo: ArtifactsRepo, sha: string): Promise<Co
       }),
   );
   return { commit: summarize(commit), files, truncated };
+}
+
+export interface Blame {
+  commits: CommitSummary[];
+  lines: number[];
+  /** True when history was cut off; the oldest lines are attributed to the oldest commit read. */
+  truncated: boolean;
+}
+
+/**
+ * Line-by-line authorship of a file on `ref`, from its first-parent history (up to `depth` commits).
+ * Walks oldest to newest and carries each line's origin through line diffs.
+ */
+export async function blame(repo: ArtifactsRepo, ref: string, path: string, depth = 80): Promise<Blame | null> {
+  const history = await repo.log({ ref, limit: depth });
+  if (!history.length) return null;
+  const versions: { commit: ArtifactsCommitMetadata; text: string | null }[] = [];
+  // Newest first; stop once the file did not exist.
+  for (const commit of history) {
+    const blob = await repo.readFile({ ref: commit.hash, path });
+    const text = blob ? await blob.text() : null;
+    versions.push({ commit, text });
+    if (text === null) break;
+  }
+  if (versions[0].text === null) return null;
+  const truncated = versions[versions.length - 1].text !== null && history.length === depth;
+
+  const commits: CommitSummary[] = [];
+  let lines: number[] = [];
+  let previous: string[] = [];
+  for (const { commit, text } of versions.reverse()) {
+    if (text === null) continue;
+    const current = text.split("\n");
+    if (lines.length && current.join("\n") === previous.join("\n")) continue;
+    commits.push(summarize(commit));
+    const index = commits.length - 1;
+    const next: number[] = [];
+    let i = 0;
+    for (const part of diffArrays(previous, current)) {
+      if (part.removed) {
+        i += part.count ?? part.value.length;
+      } else if (part.added) {
+        for (let k = 0; k < (part.count ?? part.value.length); k++) next.push(index);
+      } else {
+        for (let k = 0; k < (part.count ?? part.value.length); k++) next.push(lines[i++] ?? index);
+      }
+    }
+    lines = next;
+    previous = current;
+  }
+  return { commits, lines, truncated };
 }

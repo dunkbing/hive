@@ -14,9 +14,11 @@
     "@anthropic-ai/sdk": "catalog:",
     "@hive/core": "workspace:*",
     "diff": "catalog:",
+    "dompurify": "catalog:",
     "highlight.js": "catalog:",
     "hono": "catalog:",
     "isomorphic-git": "catalog:",
+    "marked": "catalog:",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router": "catalog:"

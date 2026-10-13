@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { auth, directory, loadUser, type AppEnv } from "./auth.ts";
-import { commitDetail, listTree, log } from "./browse.ts";
+import { blame, commitDetail, listTree, log } from "./browse.ts";
+import { listRefs } from "./git.ts";
 import { planGoal } from "./planner.ts";
 import type { RepoSource } from "./coordinator.ts";
 import type { MergeMode, RepoRecord, User, Visibility } from "@hive/core";
@@ -168,17 +169,38 @@ repo.get("/commit/:sha", async (c) => {
   return detail ? c.json(detail) : c.json({ error: "commit not found" }, 404);
 });
 
-/** A read-only clone command with a one-hour token, for anyone who can see the repo. */
+/**
+ * A clone command with a one-hour token: read-only for anyone who can see the repo, read-write (`?write=1`) for
+ * the owner. Pushes are picked up by the coordinator before its next merge.
+ */
 repo.get("/clone", async (c) => {
   const record = c.get("repo");
+  const write = c.req.query("write") === "1";
+  if (write && !c.get("canWrite")) return c.json({ error: "only the owner can get a write token" }, 403);
   using art = await c.env.ARTIFACTS.get(record.id);
   const info = await art.info();
-  const token = await art.createToken("read", 3600);
+  const token = await art.createToken(write ? "write" : "read", 3600);
   return c.json({
     remote: info.remote,
+    write,
     expiresAt: token.expiresAt,
     command: `git -c http.extraHeader="Authorization: Bearer ${token.plaintext}" clone ${info.remote} ${record.name}`,
+    token: token.plaintext,
   });
+});
+
+repo.get("/refs", async (c) => {
+  using art = await c.env.ARTIFACTS.get(c.get("repo").id);
+  const [info, token] = await Promise.all([art.info(), art.createToken("read", 300)]);
+  return c.json(await listRefs({ url: info.remote, token: token.plaintext }));
+});
+
+repo.get("/blame", async (c) => {
+  const path = c.req.query("path");
+  if (!path) return c.json({ error: "path is required" }, 400);
+  using art = await c.env.ARTIFACTS.get(artifactName(c));
+  const result = await blame(art, c.req.query("ref") || (await defaultRef(c)), path);
+  return result ? c.json(result) : c.json({ error: "file not found" }, 404);
 });
 
 repo.post("/agents", async (c) => {

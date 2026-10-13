@@ -181,3 +181,14 @@ export async function defaultBranch(remote: Remote): Promise<string> {
   const target = refs.find((r) => r.ref === "HEAD")?.target;
   return target?.replace(/^refs\/heads\//, "") ?? "main";
 }
+
+/** Branches and tags on a remote. */
+export async function listRefs(remote: Remote): Promise<{ branches: string[]; tags: string[] }> {
+  const refs = await git.listServerRefs({ http, url: remote.url, prefix: "refs/", onAuth: onAuth(remote) });
+  const names = (prefix: string) =>
+    refs
+      .filter((r) => r.ref.startsWith(prefix) && !r.ref.endsWith("^{}"))
+      .map((r) => r.ref.slice(prefix.length))
+      .sort();
+  return { branches: names("refs/heads/"), tags: names("refs/tags/") };
+}

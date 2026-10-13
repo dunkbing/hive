@@ -1,5 +1,7 @@
 import type { FileChange, Visibility } from "@hive/core";
+import DOMPurify from "dompurify";
 import { structuredPatch } from "diff";
+import { marked } from "marked";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
 import c from "highlight.js/lib/languages/c";
@@ -287,4 +289,10 @@ export const INTENT_LABEL: Record<import("@hive/core").IntentStatus, string> = {
 
 export function isRunning(status: import("@hive/core").AgentStatus) {
   return !["done", "failed", "cancelled", "review"].includes(status);
+}
+
+/** Renders untrusted Markdown: parsed by marked, then sanitized by DOMPurify. */
+export function Markdown({ source }: { source: string }) {
+  const html = useMemo(() => DOMPurify.sanitize(marked.parse(source, { async: false, gfm: true })), [source]);
+  return <div className="markdown" dangerouslySetInnerHTML={{ __html: html }} />;
 }

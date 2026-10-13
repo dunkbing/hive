@@ -98,7 +98,7 @@ function LoadedRepo(props: { owner: string; name: string; repo: RepoRecord; canW
         </div>
       )}
 
-      {cloneOpen && <CloneDialog owner={owner} name={name} onClose={() => setCloneOpen(false)} />}
+      {cloneOpen && <CloneDialog owner={owner} name={name} canWrite={canWrite} onClose={() => setCloneOpen(false)} />}
     </div>
   );
 }
@@ -138,15 +138,42 @@ function FailedRepo({ ctx }: { ctx: RepoContext }) {
   );
 }
 
-function CloneDialog({ owner, name, onClose }: { owner: string; name: string; onClose: () => void }) {
-  const clone = useLoad(() => api.clone(owner, name), `clone:${owner}/${name}`);
+function CloneDialog({
+  owner,
+  name,
+  canWrite,
+  onClose,
+}: {
+  owner: string;
+  name: string;
+  canWrite: boolean;
+  onClose: () => void;
+}) {
+  const [write, setWrite] = useState(false);
+  const clone = useLoad(() => api.clone(owner, name, write), `clone:${owner}/${name}:${write}`);
   const [copied, setCopied] = useState(false);
   return (
     <Modal title="Clone with git" onClose={onClose}>
       <p className="muted">
-        A read-only token valid for one hour is included. The repository lives in Cloudflare Artifacts and works with
-        any git client.
+        The repository lives in Cloudflare Artifacts and works with any git client. The command includes a token valid
+        for one hour.
       </p>
+      {canWrite && (
+        <div className="segmented">
+          <button className={!write ? "on" : ""} onClick={() => setWrite(false)}>
+            Read-only
+          </button>
+          <button className={write ? "on" : ""} onClick={() => setWrite(true)}>
+            Read-write
+          </button>
+        </div>
+      )}
+      {write && (
+        <p className="muted small">
+          You can push to the default branch yourself. Agents pick up your commits before their next merge; lease the
+          files you are editing (on the Code tab) so agents work around them.
+        </p>
+      )}
       {clone.error ? (
         <ErrorBox error={clone.error} />
       ) : !clone.data ? (
